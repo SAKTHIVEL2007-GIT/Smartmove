@@ -1,0 +1,57 @@
+# ==============================================================================
+# SafeCity Loop V2 — Git Ignore Configuration
+# ==============================================================================
+
+# Environment & Secrets (NEVER COMMIT)
+.env
+.env.*
+!.env.example
+!frontend/.env.example
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+safecity.db
+
+# Frontend dependencies & build outputs
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.eslintcache
+
+# Python artifacts & virtual environments
+__pycache__/
+*/__pycache__/
+*/*/__pycache__/
+*.py[cod]
+*.class
+*.so
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# AI Models & Large Weights (tracked separately / auto-downloaded)
+*.pt
+*.pth
+*.onnx
+*.weights
+!models/README.md
+
+# Uploads & Temporary Media
+uploads/
+*.mp4
+*.avi
+*.mov
+
+# Operating System & IDE files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
