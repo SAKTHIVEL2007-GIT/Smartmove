@@ -382,16 +382,28 @@ class PotholeDetectionItemOut(BaseModel):
 
 
 class PotholeAnalysisOut(BaseModel):
+    success: bool = True
+    image_id: Optional[str] = None
     is_demo_mode: bool
+    is_precomputed_demo: Optional[bool] = False
     model_status: str
     status_message: str
     model_path: str
     pothole_count: int
+    detection_count: Optional[int] = 0
     confidence: float
+    average_confidence: Optional[float] = 0.0
+    processing_time_ms: Optional[int] = 0
+    processing_time_sec: Optional[float] = 0.0
     visual_severity: Optional[str] = "HIGH"
     contextual_severity: Optional[str] = "HIGH"
+    highest_severity: Optional[str] = "HIGH"
+    traffic_exposure: Optional[str] = "HIGH"
+    vulnerable_users: Optional[str] = "HIGH"
+    persistence: Optional[str] = "MEDIUM"
     severity: str
     risk_score: float
+    risk_confidence: Optional[str] = "HIGH"
     risk_formula: str
     detections: List[PotholeDetectionItemOut]
     original_image_url: str
@@ -402,6 +414,7 @@ class PotholeAnalysisOut(BaseModel):
     evidence_id: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    gps_source: Optional[str] = "Location unavailable"
     gps_accuracy: Optional[float] = 2.5
     is_simulated_gps: Optional[bool] = False
     timestamp: Optional[str] = None
@@ -444,7 +457,10 @@ class ConflictHotspotOut(BaseModel):
 
 
 class TrafficAnalysisOut(BaseModel):
+    success: bool = True
+    video_id: Optional[str] = None
     is_demo_mode: bool
+    is_demo_video: Optional[bool] = False
     model_status: str
     status_message: str
     junction_id: Optional[int]
@@ -453,10 +469,12 @@ class TrafficAnalysisOut(BaseModel):
     duration_seconds: float
     total_frames: int
     processed_frames: int
+    processing_time_sec: Optional[float] = 0.0
     tracked_objects_count: int
     object_class_counts: Dict[str, int]
     near_miss_count: int
     near_misses: List[TrafficConflictDetailOut]
+    timeline: Optional[List[Dict[str, Any]]] = []
     original_video_url: str
     processed_video_url: Optional[str]
     conflict_snapshots: List[str]

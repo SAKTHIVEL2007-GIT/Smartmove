@@ -261,3 +261,24 @@ class CitizenReport(Base):
     photo_url = Column(String(500), nullable=True)
     status = Column(String(50), default="AI Verification Pending")
     submitted_at = Column(DateTime, default=datetime.utcnow)
+
+
+class VideoAnalysis(Base):
+    """Log of processed traffic video sessions."""
+    __tablename__ = "video_analyses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    video_id = Column(String(100), unique=True, index=True)
+    filename = Column(String(255), nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    road_id = Column(Integer, ForeignKey("roads.id"), nullable=True)
+    junction_id = Column(Integer, ForeignKey("junctions.id"), nullable=True)
+    frame_count = Column(Integer, default=0)
+    processed_frames = Column(Integer, default=0)
+    object_count = Column(Integer, default=0)
+    conflict_count = Column(Integer, default=0)
+    processing_time_sec = Column(Float, default=0.0)
+    video_url = Column(String(500), nullable=True)
+    processed_video_url = Column(String(500), nullable=True)
+    summary_json = Column(JSON, default=dict)
+

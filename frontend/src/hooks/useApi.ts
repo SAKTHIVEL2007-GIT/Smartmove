@@ -181,8 +181,8 @@ export function useAIEvents() {
 
 export function useAnalyzePothole() {
   const queryClient = useQueryClient()
-  return useMutation<PotholeAnalysisResult, Error, { file: File; road_id?: number; latitude?: number; longitude?: number }>({
-    mutationFn: async ({ file, road_id, latitude, longitude }) => {
+  return useMutation<PotholeAnalysisResult, Error, { file: File; road_id?: number; latitude?: number; longitude?: number; is_demo_sample?: boolean }>({
+    mutationFn: async ({ file, road_id, latitude, longitude, is_demo_sample }) => {
       const formData = new FormData()
       formData.append('file', file)
       if (road_id !== undefined && road_id !== null) {
@@ -193,6 +193,9 @@ export function useAnalyzePothole() {
       }
       if (longitude !== undefined && longitude !== null) {
         formData.append('longitude', longitude.toString())
+      }
+      if (is_demo_sample !== undefined) {
+        formData.append('is_demo_sample', is_demo_sample.toString())
       }
       const response = await api.post('/api/potholes/analyze', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -214,8 +217,8 @@ export function useAnalyzePothole() {
 
 export function useAnalyzeTraffic() {
   const queryClient = useQueryClient()
-  return useMutation<TrafficAnalysisResult, Error, { file: File; junction_id?: number; road_id?: number; ttc_threshold?: number; apply_privacy?: boolean }>({
-    mutationFn: async ({ file, junction_id, road_id, ttc_threshold, apply_privacy = true }) => {
+  return useMutation<TrafficAnalysisResult, Error, { file: File; junction_id?: number; road_id?: number; ttc_threshold?: number; apply_privacy?: boolean; is_demo_video?: boolean }>({
+    mutationFn: async ({ file, junction_id, road_id, ttc_threshold, apply_privacy = true, is_demo_video = false }) => {
       const formData = new FormData()
       formData.append('file', file)
       if (junction_id !== undefined && junction_id !== null) {
@@ -228,6 +231,7 @@ export function useAnalyzeTraffic() {
         formData.append('ttc_threshold', ttc_threshold.toString())
       }
       formData.append('apply_privacy', apply_privacy.toString())
+      formData.append('is_demo_video', is_demo_video.toString())
       const response = await api.post('/api/traffic/analyze', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
@@ -247,6 +251,20 @@ export function useAnalyzeTraffic() {
   })
 }
 
+export function useDemoTrafficVideo() {
+  return useQuery<{
+    success: boolean
+    video_url: string
+    filename: string
+    description: string
+    fps: number
+    duration_sec: number
+  }>({
+    queryKey: ['demo-traffic-video'],
+    queryFn: async () => (await api.get('/api/traffic/demo-video')).data,
+  })
+}
+
 // ── Road Intelligence ─────────────────────────────────────────────────────────
 export function useRoadSegments() {
   return useQuery<Road[]>({
@@ -263,7 +281,6 @@ export function useRoadSegmentDossier(segmentId: number | null) {
   })
 }
 
-// ── Traffic Conflicts ─────────────────────────────────────────────────────────
 export function useConflicts(params?: { road_id?: number; risk_level?: string; review_status?: string }) {
   return useQuery<NearMiss[]>({
     queryKey: ['conflicts', params],
@@ -280,9 +297,12 @@ export function useConflictHotspots() {
 
 export function useReviewConflict() {
   const queryClient = useQueryClient()
-  return useMutation<NearMiss, Error, { eventId: number; review_status: string; notes?: string }>({
-    mutationFn: async ({ eventId, review_status, notes }) =>
-      (await api.patch(`/api/conflicts/${eventId}/review`, { review_status, notes })).data,
+  return useMutation<NearMiss, Error, { eventId?: number; conflict_id?: number; review_status?: string; status?: string; notes?: string; reviewer?: string }>({
+    mutationFn: async ({ eventId, conflict_id, review_status, status, notes }) => {
+      const id = eventId ?? conflict_id
+      const st = review_status ?? status ?? 'reviewed'
+      return (await api.patch(`/api/conflicts/${id}/review`, { review_status: st, notes })).data
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['conflicts'] })
       queryClient.invalidateQueries({ queryKey: ['conflict-hotspots'] })

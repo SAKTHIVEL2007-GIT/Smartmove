@@ -336,8 +336,31 @@ export interface PotholeAnalysisResult {
   longitude?: number | null
   gps_accuracy?: number
   is_simulated_gps?: boolean
+  success?: boolean
+  image_id?: string
+  detection_count?: number
+  average_confidence?: number
+  processing_time_ms?: number
+  processing_time_sec?: number
+  highest_severity?: string
+  traffic_exposure?: string
+  vulnerable_users?: string
+  persistence?: string
+  risk_confidence?: string
+  gps_source?: string
+  is_precomputed_demo?: boolean
   timestamp?: string
   disclaimer?: string
+}
+
+export interface VideoTimelineItem {
+  timestamp_str: string
+  seconds: number
+  status: string
+  description?: string
+  conflict?: boolean
+  conflict_id?: string
+  ttc?: number
 }
 
 export interface TrafficConflictDetail {
@@ -376,7 +399,10 @@ export interface ConflictHotspot {
 }
 
 export interface TrafficAnalysisResult {
+  success?: boolean
+  video_id?: string
   is_demo_mode: boolean
+  is_demo_video?: boolean
   model_status: string
   status_message: string
   junction_id: number | null
@@ -385,10 +411,12 @@ export interface TrafficAnalysisResult {
   duration_seconds: number
   total_frames: number
   processed_frames: number
+  processing_time_sec?: number
   tracked_objects_count: number
   object_class_counts: Record<string, number>
   near_miss_count: number
   near_misses: TrafficConflictDetail[]
+  timeline?: VideoTimelineItem[]
   original_video_url: string
   processed_video_url: string | null
   conflict_snapshots: string[]

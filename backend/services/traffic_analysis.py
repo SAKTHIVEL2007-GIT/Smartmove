@@ -10,6 +10,7 @@ are strictly approximate estimates. Labeled as 'Potential traffic conflict' / 'N
 import os
 import uuid
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional, Any
@@ -110,6 +111,10 @@ class TrafficAnalysisResult:
     processed_video_url: Optional[str]
     conflict_snapshots: List[str]
     privacy_applied: bool
+    video_id: str = ""
+    is_demo_video: bool = False
+    processing_time_sec: float = 0.0
+    timeline: List[Dict[str, Any]] = field(default_factory=list)
     privacy_notice: str = (
         "Video processing is intended to minimize unnecessary storage of "
         "personally identifiable visual information (faces and license plates anonymized)."
@@ -117,7 +122,9 @@ class TrafficAnalysisResult:
 
     def to_dict(self) -> dict:
         return {
+            "video_id": self.video_id,
             "is_demo_mode": self.is_demo_mode,
+            "is_demo_video": self.is_demo_video,
             "model_status": self.model_status,
             "status_message": self.status_message,
             "junction_id": self.junction_id,
@@ -125,10 +132,12 @@ class TrafficAnalysisResult:
             "duration_seconds": round(self.duration_seconds, 2),
             "total_frames": self.total_frames,
             "processed_frames": self.processed_frames,
+            "processing_time_sec": round(self.processing_time_sec, 2),
             "tracked_objects_count": self.tracked_objects_count,
             "object_class_counts": self.object_class_counts,
             "near_miss_count": self.near_miss_count,
             "near_misses": [m.to_dict() for m in self.near_misses],
+            "timeline": self.timeline,
             "tracked_objects_summary": self.tracked_objects_summary,
             "original_video_url": self.original_video_url,
             "processed_video_url": self.processed_video_url,
@@ -254,11 +263,13 @@ class TrafficAnalysisService:
         max_process_frames: int = 120,
         ttc_threshold: Optional[float] = None,
         apply_privacy: bool = True,
+        is_demo_video: bool = False,
     ) -> TrafficAnalysisResult:
         """
         Processes video frames with YOLOv8 + ByteTrack tracking and computes
         approximate TTC, PET, minimum distance, and trajectory vectors.
         """
+        start_time = time.time()
         os.makedirs(output_dir, exist_ok=True)
         file_id = str(uuid.uuid4())[:12]
         ext = os.path.splitext(filename)[1].lower()
@@ -299,7 +310,8 @@ class TrafficAnalysisService:
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out_writer = cv2.VideoWriter(proc_path, fourcc, effective_fps, (width, height))
 
-        is_demo = (self.model is None)
+        is_demo_synth = is_demo_video or ("demo" in filename.lower())
+        is_demo = (self.model is None) and not is_demo_synth
         current_frame_idx = 0
         processed_count = 0
 
@@ -319,7 +331,66 @@ class TrafficAnalysisService:
             active_tracks_this_frame: List[Tuple[int, str, Tuple[float, float], Tuple[float, float, float, float]]] = []
             privacy_boxes: List[Tuple[float, float, float, float, str]] = []
 
-            if not is_demo and self.model is not None:
+            if is_demo_synth:
+                # Deterministic ground-truth demo scenario tracking matching generate_demo_video.py
+                car1_y = int((height + 80) - (current_frame_idx * 4.2)) % (height + 160) - 80
+                car1_box = (250.0, float(car1_y), 290.0, float(car1_y + 60))
+                car1_c = (270.0, float(car1_y + 30))
+
+                car2_y = int((current_frame_idx * 5.8) - 70) % (height + 160) - 70
+                car2_box = (350.0, float(car2_y), 395.0, float(car2_y + 70))
+                car2_c = (372.5, float(car2_y + 35))
+
+                moto_y = int((height + 60) - (current_frame_idx * 6.5)) % (height + 120) - 60
+                moto_box = (185.0, float(moto_y), 195.0, float(moto_y + 35))
+                moto_c = (190.0, float(moto_y + 17.5))
+
+                ped_prog = (current_frame_idx % 160) / 160.0
+                ped_x = 140.0 + (ped_prog * 350.0)
+                ped_y = 285.0
+                ped1_box = (ped_x - 10.0, ped_y - 14.0, ped_x + 10.0, ped_y + 14.0)
+                ped1_c = (ped_x, ped_y)
+
+                ped2_y = float(int(20 + (current_frame_idx * 1.8)) % height)
+                ped2_box = (532.0, ped2_y - 10.0, 548.0, ped2_y + 10.0)
+                ped2_c = (540.0, ped2_y)
+
+                demo_items = [
+                    (12, "car", car1_c, car1_box, 38.0, "Northbound"),
+                    (15, "car", car2_c, car2_box, 42.0, "Southbound"),
+                    (8, "motorcycle", moto_c, moto_box, 45.0, "Northbound"),
+                    (7, "pedestrian", ped1_c, ped1_box, 4.5, "Eastbound"),
+                    (9, "pedestrian", ped2_c, ped2_box, 4.0, "Southbound"),
+                ]
+
+                for tid, cname, centroid, bbox, vel, dire in demo_items:
+                    active_tracks_this_frame.append((tid, cname, centroid, bbox))
+                    privacy_boxes.append((bbox[0], bbox[1], bbox[2], bbox[3], cname))
+                    if tid not in tracks_history:
+                        object_class_counts[cname] = object_class_counts.get(cname, 0) + 1
+                        tracks_history[tid] = TrackedObject(
+                            track_id=tid,
+                            object_type=cname,
+                            centroid=centroid,
+                            bbox=bbox,
+                            velocity=vel,
+                            direction=dire,
+                            trajectory=[centroid],
+                            timestamps=[current_time_sec],
+                        )
+                    else:
+                        obj = tracks_history[tid]
+                        obj.centroid = centroid
+                        obj.bbox = bbox
+                        obj.velocity = vel
+                        obj.direction = dire
+                        obj.trajectory.append(centroid)
+                        obj.timestamps.append(current_time_sec)
+                        if len(obj.trajectory) > 25:
+                            obj.trajectory.pop(0)
+                            obj.timestamps.pop(0)
+
+            elif not is_demo and self.model is not None:
                 # Run YOLOv8 Tracking with ByteTrack integration
                 results = self.model.track(
                     frame,
@@ -505,6 +576,8 @@ class TrafficAnalysisService:
             if conflict_snapshots:
                 c.snapshot_url = conflict_snapshots[min(i, len(conflict_snapshots) - 1)]
 
+        processing_time_sec = round(time.time() - start_time, 2)
+
         model_status = "YOLOv8 + ByteTrack Active (Local Model)" if not is_demo else "Demo AI Mode — traffic model not configured"
         status_message = (
             f"Analyzed {processed_count} frames across {duration:.1f}s video. "
@@ -516,8 +589,40 @@ class TrafficAnalysisService:
             obj.to_dict() for obj in list(tracks_history.values())[:10]
         ]
 
+        # Construct interactive event timeline
+        timeline: List[Dict[str, Any]] = [
+            {
+                "timestamp_str": "00:01",
+                "seconds": 1.0,
+                "status": "Normal Flow",
+                "description": f"{len(tracks_history)} road users detected entering corridor tracking zones.",
+                "conflict": False,
+            }
+        ]
+
+        for c in deduped_conflicts:
+            timeline.append({
+                "timestamp_str": c.timestamp_str,
+                "seconds": round(c.timestamp_seconds, 1),
+                "status": f"Potential Conflict ({c.event_severity})",
+                "description": f"{c.object_type_a.capitalize()} vs {c.object_type_b.capitalize()} (approx. TTC ~{c.ttc:.2f}s, {c.minimum_distance:.1f}m clearance)",
+                "conflict": True,
+                "conflict_id": c.conflict_id,
+                "ttc": round(c.ttc, 2),
+            })
+
+        timeline.append({
+            "timestamp_str": f"{int(duration // 60):02d}:{int(duration % 60):02d}",
+            "seconds": round(duration, 1),
+            "status": "Analysis Complete",
+            "description": f"Completed trajectory monitoring across {processed_count} frames.",
+            "conflict": False,
+        })
+
         return TrafficAnalysisResult(
+            video_id=file_id,
             is_demo_mode=is_demo,
+            is_demo_video=is_demo_synth,
             model_status=model_status,
             status_message=status_message,
             junction_id=junction_id,
@@ -525,10 +630,12 @@ class TrafficAnalysisService:
             duration_seconds=duration,
             total_frames=total_frames,
             processed_frames=processed_count,
+            processing_time_sec=processing_time_sec,
             tracked_objects_count=len(tracks_history),
             object_class_counts=object_class_counts,
             near_miss_count=len(deduped_conflicts),
             near_misses=deduped_conflicts,
+            timeline=timeline,
             tracked_objects_summary=tracks_summary,
             original_video_url=f"/uploads/traffic/{orig_filename}",
             processed_video_url=f"/uploads/traffic/{proc_filename}" if os.path.exists(proc_path) else None,

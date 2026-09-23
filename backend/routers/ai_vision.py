@@ -60,6 +60,7 @@ async def analyze_pothole_image(
     road_id: Optional[int] = Form(None),
     latitude: Optional[float] = Form(None),
     longitude: Optional[float] = Form(None),
+    is_demo_sample: Optional[bool] = Form(False),
     db: Session = Depends(get_db),
 ):
     """
@@ -109,6 +110,7 @@ async def analyze_pothole_image(
             traffic_exposure=traffic_exp,
             custom_lat=assigned_lat,
             custom_lng=assigned_lng,
+            is_demo_sample=bool(is_demo_sample),
         )
     except Exception as e:
         raise HTTPException(
@@ -192,12 +194,24 @@ async def analyze_pothole_image(
     ]
 
     return PotholeAnalysisOut(
+        success=True,
+        image_id=result.image_id,
         is_demo_mode=result.is_demo_mode,
+        is_precomputed_demo=result.is_precomputed_demo,
         model_status=result.model_status,
         status_message=result.status_message,
         model_path=result.model_path,
         pothole_count=result.pothole_count,
+        detection_count=result.pothole_count,
         confidence=result.confidence,
+        average_confidence=result.confidence,
+        processing_time_ms=result.processing_time_ms,
+        processing_time_sec=result.processing_time_sec,
+        highest_severity=result.contextual_severity,
+        traffic_exposure=result.traffic_exposure,
+        vulnerable_users=result.vulnerable_users,
+        persistence=result.persistence,
+        risk_confidence=result.risk_confidence,
         visual_severity=result.visual_severity,
         contextual_severity=result.contextual_severity,
         severity=result.severity,
@@ -212,6 +226,7 @@ async def analyze_pothole_image(
         evidence_id=result.evidence_id,
         latitude=assigned_lat,
         longitude=assigned_lng,
+        gps_source=result.gps_source,
         gps_accuracy=result.gps_accuracy,
         is_simulated_gps=result.is_simulated_gps,
         timestamp=result.timestamp,
@@ -226,6 +241,7 @@ async def analyze_traffic_video(
     road_id: Optional[int] = Form(None),
     ttc_threshold: Optional[float] = Form(2.0),
     apply_privacy: Optional[bool] = Form(True),
+    is_demo_video: Optional[bool] = Form(False),
     db: Session = Depends(get_db),
 ):
     """
@@ -260,6 +276,7 @@ async def analyze_traffic_video(
             road_id=road_id,
             ttc_threshold=ttc_threshold or 2.0,
             apply_privacy=bool(apply_privacy),
+            is_demo_video=bool(is_demo_video),
         )
     except Exception as e:
         raise HTTPException(
@@ -284,6 +301,30 @@ async def analyze_traffic_video(
     junction_name = target_junction.name if target_junction else "Monitored Junction"
     assigned_junction_id = target_junction.id if target_junction else None
     assigned_road_id = target_road.id if target_road else (target_junction.id if target_junction else 1)
+
+    # Persist VideoAnalysis session
+    try:
+        from backend.models import VideoAnalysis
+        v_analysis = VideoAnalysis(
+            video_id=result.video_id,
+            filename=file.filename or "traffic.mp4",
+            road_id=assigned_road_id,
+            junction_id=assigned_junction_id,
+            frame_count=result.total_frames,
+            processed_frames=result.processed_frames,
+            object_count=result.tracked_objects_count,
+            conflict_count=result.near_miss_count,
+            processing_time_sec=result.processing_time_sec,
+            video_url=result.original_video_url,
+            processed_video_url=result.processed_video_url,
+            summary_json={
+                "object_classes": result.object_class_counts,
+                "status": result.status_message,
+            },
+        )
+        db.add(v_analysis)
+    except Exception as e:
+        print(f"[Traffic Analysis] Error persisting VideoAnalysis: {e}")
 
     for nm in result.near_misses:
         nm_record = NearMiss(
@@ -376,7 +417,10 @@ async def analyze_traffic_video(
     ]
 
     return TrafficAnalysisOut(
+        success=True,
+        video_id=result.video_id,
         is_demo_mode=result.is_demo_mode,
+        is_demo_video=result.is_demo_video,
         model_status=result.model_status,
         status_message=result.status_message,
         junction_id=assigned_junction_id,
@@ -385,10 +429,12 @@ async def analyze_traffic_video(
         duration_seconds=result.duration_seconds,
         total_frames=result.total_frames,
         processed_frames=result.processed_frames,
+        processing_time_sec=result.processing_time_sec,
         tracked_objects_count=result.tracked_objects_count,
         object_class_counts=result.object_class_counts,
         near_miss_count=result.near_miss_count,
         near_misses=near_misses_out,
+        timeline=result.timeline,
         original_video_url=result.original_video_url,
         processed_video_url=result.processed_video_url,
         conflict_snapshots=result.conflict_snapshots,
@@ -397,6 +443,56 @@ async def analyze_traffic_video(
         privacy_notice=result.privacy_notice,
         tracked_objects_summary=result.tracked_objects_summary,
     )
+
+
+@router.get("/traffic/demo-video")
+def get_demo_video():
+    """
+    Returns path and metadata for the bundled demo traffic video.
+    Ensures the video is generated if not yet on disk.
+    """
+    demo_rel = "uploads/demo/demo_traffic_junction.mp4"
+    if not os.path.exists(demo_rel):
+        from backend.services.generate_demo_video import generate_demo_traffic_video
+        generate_demo_traffic_video(demo_rel)
+    return {
+        "success": True,
+        "video_url": f"/{demo_rel}",
+        "filename": "demo_traffic_junction.mp4",
+        "description": "Urban intersection benchmark feed with vehicles, motorcycle, and crossing pedestrian (approx. TTC 1.4s surrogate conflict event).",
+        "fps": 25.0,
+        "duration_sec": 12.0,
+    }
+
+
+@router.patch("/traffic/conflicts/{conflict_id}/review")
+def review_traffic_conflict(
+    conflict_id: int,
+    status_update: dict,
+    db: Session = Depends(get_db),
+):
+    """
+    Review a flagged candidate conflict (verified / rejected).
+    Updates NearMiss record and creates municipal audit entry.
+    """
+    nm = db.query(NearMiss).filter(NearMiss.id == conflict_id).first()
+    if not nm:
+        raise HTTPException(status_code=404, detail="Conflict event not found.")
+
+    new_status = status_update.get("status", "verified")
+    reviewer = status_update.get("reviewer", "Municipal Traffic Reviewer")
+    nm.review_status = new_status
+
+    from backend.models import AuditLog
+    db.add(AuditLog(
+        actor=reviewer,
+        action="CONFLICT_EVENT_REVIEWED",
+        target_type="NearMiss",
+        target_id=nm.id,
+        details=f"Conflict event #{nm.id} marked as {new_status} by {reviewer}.",
+    ))
+    db.commit()
+    return {"success": True, "conflict_id": nm.id, "review_status": new_status}
 
 
 @router.get("/ai/events", response_model=List[AIEvent])
