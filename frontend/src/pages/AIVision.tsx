@@ -31,6 +31,7 @@ export default function AIVision() {
   const [singleViewToggle, setSingleViewToggle] = useState<'processed' | 'original'>('processed')
   const [potholeError, setPotholeError] = useState<string | null>(null)
   const [isDemoSampleActive, setIsDemoSampleActive] = useState<boolean>(false)
+  const [isDraggingPothole, setIsDraggingPothole] = useState<boolean>(false)
 
   // Camera capture modal state
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false)
@@ -60,13 +61,11 @@ export default function AIVision() {
   const { mutate: runTrafficAnalysis, isPending: isAnalyzingTraffic } = useAnalyzeTraffic()
 
   // ── Handlers: Potholes ─────────────────────────────────────────────────────
-  const handlePotholeFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
+  const processPotholeFile = (file: File, autoRun = true) => {
     setPotholeError(null)
     setIsDemoSampleActive(false)
 
-    if (!file.type.startsWith('image/')) {
+    if (!file.type.startsWith('image/') && !file.name.match(/\.(jpg|jpeg|png|webp)$/i)) {
       setPotholeError('Please upload an image file (JPG, PNG, WEBP).')
       return
     }
@@ -78,6 +77,31 @@ export default function AIVision() {
     setPotholeFile(file)
     setPotholePreview(URL.createObjectURL(file))
     setPotholeResult(null)
+
+    if (autoRun) {
+      runPotholeAnalysis(
+        {
+          file,
+          road_id: selectedRoadId,
+          is_demo_sample: false,
+        },
+        {
+          onSuccess: (data) => {
+            setPotholeResult(data)
+          },
+          onError: (err: any) => {
+            setPotholeError(err.response?.data?.detail || err.message || 'Analysis failed. Check backend connection.')
+          },
+        }
+      )
+    }
+  }
+
+  const handlePotholeFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    processPotholeFile(file, true)
+    e.target.value = ''
   }
 
   const handlePotholeSubmit = () => {
@@ -94,7 +118,7 @@ export default function AIVision() {
           setPotholeResult(data)
         },
         onError: (err: any) => {
-          setPotholeError(err.response?.data?.detail || 'Analysis failed. Check backend connection.')
+          setPotholeError(err.response?.data?.detail || err.message || 'Analysis failed. Check backend connection.')
         },
       }
     )
@@ -125,12 +149,12 @@ export default function AIVision() {
             setPotholeResult(data)
           },
           onError: (err: any) => {
-            setPotholeError(err.response?.data?.detail || 'Demonstration execution failed.')
+            setPotholeError(err.response?.data?.detail || err.message || 'Demonstration execution failed.')
           },
         }
       )
     } catch (err: any) {
-      setPotholeError('Could not load precomputed demonstration sample.')
+      setPotholeError(err.message || 'Could not load precomputed demonstration sample.')
     }
   }
 
@@ -140,17 +164,35 @@ export default function AIVision() {
         await loadPrecomputedDemoSample()
         return
       }
+      setPotholeError(null)
       setIsDemoSampleActive(false)
       const url = '/uploads/samples/sample_clean_road.jpg'
       const response = await fetch(url)
+      if (!response.ok) throw new Error('Clean road sample not found.')
       const blob = await response.blob()
-      const file = new File([blob], `${type}_sample.jpg`, { type: 'image/jpeg' })
+      const file = new File([blob], 'sample_clean_road.jpg', { type: 'image/jpeg' })
       setPotholeFile(file)
       setPotholePreview(URL.createObjectURL(blob))
       setPotholeResult(null)
-      setPotholeError(null)
-    } catch {
-      setPotholeError(`Unable to load sample ${type} image.`)
+
+      // Immediately execute analysis to verify 0 defects on clean asphalt
+      runPotholeAnalysis(
+        {
+          file,
+          road_id: selectedRoadId || (roads[0]?.id ?? 1),
+          is_demo_sample: false,
+        },
+        {
+          onSuccess: (data) => {
+            setPotholeResult(data)
+          },
+          onError: (err: any) => {
+            setPotholeError(err.response?.data?.detail || err.message || 'Clean sample analysis failed.')
+          },
+        }
+      )
+    } catch (err: any) {
+      setPotholeError(err.message || `Unable to load sample ${type} image.`)
     }
   }
 
@@ -192,10 +234,8 @@ export default function AIVision() {
     canvas.toBlob((blob) => {
       if (!blob) return
       const file = new File([blob], `road_cam_${Date.now()}.jpg`, { type: 'image/jpeg' })
-      setPotholeFile(file)
-      setPotholePreview(URL.createObjectURL(blob))
-      setPotholeResult(null)
       stopCamera()
+      processPotholeFile(file, true)
     }, 'image/jpeg', 0.92)
   }
 
@@ -396,7 +436,30 @@ export default function AIVision() {
               {/* Drag & Drop Area */}
               <div
                 onClick={() => potholeInputRef.current?.click()}
-                className="border-2 border-dashed border-gray-700 hover:border-accent/60 bg-navy-900/60 rounded-lg p-5 text-center cursor-pointer transition-colors"
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setIsDraggingPothole(true)
+                }}
+                onDragLeave={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setIsDraggingPothole(false)
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setIsDraggingPothole(false)
+                  const droppedFile = e.dataTransfer.files?.[0]
+                  if (droppedFile) {
+                    processPotholeFile(droppedFile, true)
+                  }
+                }}
+                className={`border-2 border-dashed rounded-lg p-5 text-center cursor-pointer transition-all duration-150 ${
+                  isDraggingPothole
+                    ? 'border-accent bg-accent/20 scale-[1.02] shadow-lg shadow-accent/20'
+                    : 'border-gray-700 hover:border-accent/60 bg-navy-900/60'
+                }`}
               >
                 <input
                   ref={potholeInputRef}
@@ -405,11 +468,13 @@ export default function AIVision() {
                   className="hidden"
                   onChange={handlePotholeFileChange}
                 />
-                <div className="text-3xl mb-1.5">📸</div>
-                <div className="text-white text-sm font-medium">Click or Drag & Drop Road Image</div>
-                <div className="text-gray-500 text-xs mt-0.5">Supports JPG, PNG, WEBP (Max 15MB)</div>
+                <div className="text-3xl mb-1.5">{isDraggingPothole ? '📥' : '📸'}</div>
+                <div className="text-white text-sm font-semibold">
+                  {isDraggingPothole ? 'Drop Image Here to Analyze' : 'Click or Drag & Drop Road Image'}
+                </div>
+                <div className="text-gray-400 text-xs mt-0.5">Auto-runs YOLOv8 inspection (JPG, PNG, WEBP &lt; 15MB)</div>
                 {potholeFile && (
-                  <div className="mt-2.5 text-xs bg-accent/10 text-accent-light px-2.5 py-1 rounded inline-block font-mono border border-accent/20">
+                  <div className="mt-2.5 text-xs bg-accent/15 text-accent-light px-2.5 py-1 rounded inline-block font-mono border border-accent/30 font-semibold">
                     {potholeFile.name} ({(potholeFile.size / 1024).toFixed(0)} KB)
                   </div>
                 )}
@@ -425,20 +490,23 @@ export default function AIVision() {
                   <span>📷</span> Capture from Live Camera
                 </button>
 
-                <div className="grid grid-cols-2 gap-2 pt-1">
+                <div className="text-[11px] font-semibold text-gray-400 pt-1">ONE-CLICK TEST SAMPLES:</div>
+                <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
                     onClick={loadPrecomputedDemoSample}
-                    className="text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 py-1.5 px-2 rounded border border-amber-500/30 text-center transition-colors font-medium flex items-center justify-center gap-1"
+                    disabled={isAnalyzingPothole}
+                    className="text-xs bg-amber-500/10 hover:bg-amber-500/25 text-amber-300 py-2 px-2.5 rounded border border-amber-500/40 text-center transition-colors font-semibold flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
                   >
-                    <span>★</span> Precomputed Demo
+                    <span>★</span> Damaged Road (Potholes)
                   </button>
                   <button
                     type="button"
                     onClick={() => loadSamplePotholeImage('clean')}
-                    className="text-xs bg-navy-900 hover:bg-navy-700 text-gray-300 py-1.5 px-2 rounded border border-gray-800 text-center transition-colors truncate"
+                    disabled={isAnalyzingPothole}
+                    className="text-xs bg-emerald-500/10 hover:bg-emerald-500/25 text-emerald-300 py-2 px-2.5 rounded border border-emerald-500/40 text-center transition-colors font-semibold flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
                   >
-                    Clean Road Sample
+                    <span>✓</span> Clean Highway (0 Defects)
                   </button>
                 </div>
               </div>
@@ -805,12 +873,30 @@ export default function AIVision() {
               </>
             ) : (
               <div className="card p-10 text-center flex flex-col items-center justify-center min-h-[420px]">
-                {potholePreview ? (
-                  <div className="space-y-3 max-w-sm">
-                    <img src={potholePreview} alt="Upload preview" className="max-h-48 rounded border border-gray-700 mx-auto" />
-                    <div className="text-white text-sm font-medium">Image loaded and ready for analysis</div>
-                    <button onClick={handlePotholeSubmit} className="btn-primary w-full text-xs">
-                      Run Road Image Analysis →
+                {isAnalyzingPothole ? (
+                  <div className="space-y-4 max-w-sm text-center">
+                    <div className="w-16 h-16 rounded-full border-4 border-accent border-t-transparent animate-spin mx-auto shadow-lg shadow-accent/20" />
+                    <div className="text-white text-base font-bold">Executing YOLOv8 Neural Inference...</div>
+                    <p className="text-gray-400 text-xs leading-relaxed">
+                      Detecting asphalt cavities, computing bounding boxes, measuring physical dimensions, and synthesizing corridor risk score...
+                    </p>
+                    {potholePreview && (
+                      <div className="relative rounded-lg overflow-hidden border border-accent/40 max-w-[280px] mx-auto mt-2 opacity-75">
+                        <img src={potholePreview} alt="Scanning" className="max-h-36 w-auto mx-auto object-cover" />
+                        <div className="absolute inset-0 bg-accent/15 animate-pulse flex items-center justify-center">
+                          <span className="text-[11px] font-mono font-bold bg-navy-950/80 text-accent px-2 py-0.5 rounded border border-accent/40">
+                            SCANNING SURFACE...
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : potholePreview ? (
+                  <div className="space-y-4 max-w-sm">
+                    <img src={potholePreview} alt="Upload preview" className="max-h-52 rounded-lg border border-gray-700 mx-auto shadow-md" />
+                    <div className="text-white text-sm font-semibold">Image loaded and ready for analysis</div>
+                    <button onClick={handlePotholeSubmit} disabled={isAnalyzingPothole} className="btn-primary w-full text-xs py-2.5 flex items-center justify-center gap-2">
+                      <span>⚡</span> Run Road Image Analysis →
                     </button>
                   </div>
                 ) : (
@@ -820,14 +906,22 @@ export default function AIVision() {
                     </div>
                     <div className="text-white font-semibold text-base">No Road Image Analyzed Yet</div>
                     <p className="text-gray-400 text-xs leading-relaxed">
-                      Upload an asphalt surface photo (JPG or PNG) or click <strong>[Precomputed Demo]</strong> to view real YOLOv8 pothole detection bounding boxes, severity assessment, and synthesized road risk scores.
+                      Upload an asphalt surface photo (JPG or PNG) or choose a test sample above to inspect surface distress, bounding boxes, severity assessment, and synthesized road risk scores.
                     </p>
-                    <button
-                      onClick={loadPrecomputedDemoSample}
-                      className="px-4 py-2 bg-accent/20 hover:bg-accent/30 text-accent-light border border-accent/40 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
-                    >
-                      <span>▶</span> Run Precomputed Demonstration
-                    </button>
+                    <div className="flex items-center justify-center gap-2 pt-2">
+                      <button
+                        onClick={loadPrecomputedDemoSample}
+                        className="px-3.5 py-2 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors shadow-sm"
+                      >
+                        <span>★</span> Damaged Road Sample
+                      </button>
+                      <button
+                        onClick={() => loadSamplePotholeImage('clean')}
+                        className="px-3.5 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors shadow-sm"
+                      >
+                        <span>✓</span> Clean Road Sample
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>

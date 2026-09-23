@@ -198,7 +198,8 @@ export function useAnalyzePothole() {
         formData.append('is_demo_sample', is_demo_sample.toString())
       }
       const response = await api.post('/api/potholes/analyze', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
+        headers: { 'Content-Type': undefined },
+        timeout: 120_000,
       })
       return response.data
     },
@@ -233,7 +234,8 @@ export function useAnalyzeTraffic() {
       formData.append('apply_privacy', apply_privacy.toString())
       formData.append('is_demo_video', is_demo_video.toString())
       const response = await api.post('/api/traffic/analyze', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
+        headers: { 'Content-Type': undefined },
+        timeout: 300_000,
       })
       return response.data
     },

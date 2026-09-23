@@ -2,6 +2,7 @@ import { NavLink } from 'react-router-dom'
 
 const mainNavItems = [
   { path: '/', label: 'Command Center', icon: '⬡' },
+  { path: '/ai-vision', label: 'Vision AI Studio', icon: '👁' },
   { path: '/road-intelligence', label: 'Road Intelligence', icon: '🛣' },
   { path: '/traffic-conflicts', label: 'Traffic Conflicts', icon: '⚡' },
   { path: '/map', label: 'Risk Map', icon: '🗺' },
@@ -14,7 +15,6 @@ const mainNavItems = [
 ]
 
 const utilityNavItems = [
-  { path: '/ai-vision', label: 'Vision AI Studio', icon: '👁' },
   { path: '/danger-zones', label: 'Danger Zones', icon: '⚠' },
   { path: '/digital-twin', label: 'Digital Twin', icon: '◈' },
   { path: '/junction-display', label: 'Roadside Billboard', icon: '🚨' },

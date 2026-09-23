@@ -109,6 +109,13 @@ export default function Overview() {
             <span>RUN SAFECITY DEMO</span>
           </button>
           <button
+            onClick={() => navigate('/ai-vision')}
+            className="px-3.5 py-2 rounded-xl bg-accent/20 border border-accent/40 hover:bg-accent/30 text-accent-light text-xs font-bold flex items-center gap-1.5 transition-colors"
+          >
+            <span>👁</span>
+            <span>Vision AI Studio</span>
+          </button>
+          <button
             onClick={() => navigate('/road-intelligence')}
             className="px-3.5 py-2 rounded-xl bg-navy-900 border border-gray-700 hover:border-accent text-gray-200 text-xs font-bold flex items-center gap-1.5 transition-colors"
           >
