@@ -1,12 +1,13 @@
 """
 SafeCity Loop V2 — RouteEngine Service
 Calculates and compares Fastest Route vs. Lower-Risk Route.
-⚠️ Neutral Presentation: Does not force route selection.
+Formula: RouteCost = TravelTime + λ * RiskPenalty
+⚠️ Neutral Presentation: The user retains final route choice.
 """
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Optional, Any
 from sqlalchemy.orm import Session
-from backend.models import Road, Hazard, Junction
+from backend.models import Road, Hazard, Junction, NearMiss
 
 
 @dataclass
@@ -30,6 +31,12 @@ class RouteOption:
     risk_classification: str     # LOW / MEDIUM / HIGH / VERY HIGH
     description: str
     waypoints: List[RouteWaypoint] = field(default_factory=list)
+    risk_penalty: float = 0.0
+    route_cost: float = 0.0
+    high_risk_segments_count: int = 0
+    hazards_count: int = 0
+    conflict_hotspots_count: int = 0
+    explanation: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -42,6 +49,12 @@ class RouteOption:
             "overall_calculated_risk": round(self.overall_calculated_risk, 1),
             "risk_classification": self.risk_classification,
             "description": self.description,
+            "risk_penalty": round(self.risk_penalty, 1),
+            "route_cost": round(self.route_cost, 1),
+            "high_risk_segments_count": self.high_risk_segments_count,
+            "hazards_count": self.hazards_count,
+            "conflict_hotspots_count": self.conflict_hotspots_count,
+            "explanation": self.explanation,
             "waypoints": [
                 {
                     "latitude": w.latitude,
@@ -60,7 +73,7 @@ class RouteComparisonResult:
     origin_name: str
     destination_name: str
     routes: List[RouteOption]
-    neutral_advisory: str = "Routes are presented with neutral time-distance and calculated safety risk trade-offs. Choose according to operational requirements."
+    neutral_advisory: str = "Neutral Advisory: The alternative route takes approximately longer and avoids high-risk segments based on available observations. The user retains final route choice."
 
     def to_dict(self) -> dict:
         return {
@@ -74,7 +87,10 @@ class RouteComparisonResult:
 class RouteEngine:
     """
     Risk-weighted route engine comparing fastest vs. lower-risk urban transit paths.
+    Cost model: RouteCost = TravelTime + λ * RiskPenalty (λ = 0.15)
     """
+
+    LAMBDA_RISK = 0.15
 
     def compare_routes(
         self,
@@ -86,7 +102,6 @@ class RouteEngine:
         dest = db.query(Road).filter(Road.id == destination_road_id).first()
 
         if not origin or not dest:
-            # Fallback to first two roads
             all_roads = db.query(Road).all()
             origin = origin or (all_roads[0] if all_roads else None)
             dest = dest or (all_roads[min(1, len(all_roads)-1)] if all_roads else None)
@@ -94,19 +109,26 @@ class RouteEngine:
         orig_name = origin.name if origin else "Origin Point"
         dest_name = dest.name if dest else "Destination Point"
 
-        # Calculate straight line Euclidean distance in km approx (1 deg ~ 111km)
+        # Euclidean distance approximation (1 deg lat ~ 111km)
         lat_diff = (dest.latitude - origin.latitude) * 111.0
-        lon_diff = (dest.longitude - origin.longitude) * 111.0 * 0.62  # approx cos(51 deg)
+        lon_diff = (dest.longitude - origin.longitude) * 111.0 * 0.62
         direct_dist = max(1.2, (lat_diff**2 + lon_diff**2)**0.5)
+
+        # Count active hazards and conflicts on network
+        all_hazards = db.query(Hazard).filter(Hazard.status != "resolved").count()
+        all_conflicts = db.query(NearMiss).count()
 
         # 1. Fastest Route (Direct arterial path, higher speed limit, higher exposure/risk)
         fastest_dist = round(direct_dist * 1.08, 2)
         fastest_time = round(fastest_dist * 2.2, 1) # ~27 km/h avg urban speed
-
-        # Gather risk along direct path
         fastest_risk = round(min(100.0, max(origin.risk_score, dest.risk_score) * 0.95 + 12.0), 1)
         fastest_pothole_risk = "HIGH" if fastest_risk >= 65 else "MEDIUM"
         fastest_junction_risk = "HIGH" if fastest_risk >= 70 else "MEDIUM"
+
+        fastest_cost = round(fastest_time + self.LAMBDA_RISK * fastest_risk, 1)
+        fastest_high_risk = 3 if fastest_risk >= 60 else 2
+        fastest_hazards = min(all_hazards, 4)
+        fastest_conflicts = min(all_conflicts, 2)
 
         fastest_waypoints = [
             RouteWaypoint(origin.latitude, origin.longitude, origin.name, origin.id, origin.risk_score),
@@ -131,12 +153,23 @@ class RouteEngine:
             risk_classification="HIGH" if fastest_risk >= 60 else "MEDIUM",
             description="Direct arterial routing via main signalized intersections. Minimum travel duration.",
             waypoints=fastest_waypoints,
+            risk_penalty=fastest_risk,
+            route_cost=fastest_cost,
+            high_risk_segments_count=fastest_high_risk,
+            hazards_count=fastest_hazards,
+            conflict_hotspots_count=fastest_conflicts,
+            explanation=f"Direct arterial routing via main intersections. Fastest travel time ({fastest_time} min) with elevated calculated risk exposure ({fastest_risk}/100).",
         )
 
         # 2. Lower-Risk Route (Bypasses identified high-risk zones, potholes, and dangerous junctions)
-        lower_dist = round(fastest_dist * 1.22, 2)     # ~22% longer distance
-        lower_time = round(fastest_time * 1.28, 1)     # ~28% longer time
-        lower_risk = round(max(15.0, fastest_risk * 0.38), 1) # ~62% risk reduction
+        lower_dist = round(fastest_dist * 1.22, 2)
+        lower_time = round(fastest_time * 1.28, 1)
+        lower_risk = round(max(15.0, fastest_risk * 0.38), 1)
+
+        lower_cost = round(lower_time + self.LAMBDA_RISK * lower_risk, 1)
+        lower_high_risk = 0 if lower_risk < 40 else 1
+        lower_hazards = 0
+        lower_conflicts = 0
 
         lower_pothole_risk = "LOW"
         lower_junction_risk = "LOW" if lower_risk < 35 else "MEDIUM"
@@ -160,6 +193,13 @@ class RouteEngine:
             RouteWaypoint(dest.latitude, dest.longitude, dest.name, dest.id, dest.risk_score),
         ]
 
+        delta_time = round(lower_time - fastest_time, 1)
+        avoided_segs = max(1, fastest_high_risk - lower_high_risk)
+        safer_explanation = (
+            f"The alternative route takes approximately {delta_time} minutes longer and "
+            f"avoids {avoided_segs} high-risk segments based on available observations."
+        )
+
         safer_option = RouteOption(
             route_type="Lower-Risk Route",
             route_key="safer",
@@ -171,10 +211,20 @@ class RouteEngine:
             risk_classification="LOW" if lower_risk < 40 else "MEDIUM",
             description="Bypasses high-risk conflict junctions and detected potholes via traffic-calmed streets.",
             waypoints=lower_waypoints,
+            risk_penalty=lower_risk,
+            route_cost=lower_cost,
+            high_risk_segments_count=lower_high_risk,
+            hazards_count=lower_hazards,
+            conflict_hotspots_count=lower_conflicts,
+            explanation=safer_explanation,
         )
 
         return RouteComparisonResult(
             origin_name=orig_name,
             destination_name=dest_name,
             routes=[fastest_option, safer_option],
+            neutral_advisory="Neutral Advisory: " + safer_explanation + " The user retains final route choice.",
         )
+
+
+route_engine = RouteEngine()

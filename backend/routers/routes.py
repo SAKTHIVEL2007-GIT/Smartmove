@@ -47,6 +47,12 @@ def compare_routes_get(
                 overall_calculated_risk=r.overall_calculated_risk,
                 risk_classification=r.risk_classification,
                 description=r.description,
+                risk_penalty=r.risk_penalty,
+                route_cost=r.route_cost,
+                high_risk_segments_count=r.high_risk_segments_count,
+                hazards_count=r.hazards_count,
+                conflict_hotspots_count=r.conflict_hotspots_count,
+                explanation=r.explanation,
                 waypoints=[
                     RouteWaypointOut(
                         latitude=w.latitude,

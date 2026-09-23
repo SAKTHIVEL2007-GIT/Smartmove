@@ -58,11 +58,14 @@ def get_ai_status():
 async def analyze_pothole_image(
     file: UploadFile = File(...),
     road_id: Optional[int] = Form(None),
+    latitude: Optional[float] = Form(None),
+    longitude: Optional[float] = Form(None),
     db: Session = Depends(get_db),
 ):
     """
     Upload road image -> Run local YOLOv8 / Demo AI inference ->
-    Compute severity, confidence, risk score -> Save Hazard to DB -> Return result.
+    Compute visual severity, contextual severity, confidence, risk score ->
+    Save Hazard + Evidence Record + Audit Log to DB -> Return result.
     """
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_IMAGE_EXTENSIONS:
@@ -71,7 +74,6 @@ async def analyze_pothole_image(
             detail=f"Unsupported image extension '{ext}'. Allowed formats: JPG, JPEG, PNG, WEBP.",
         )
 
-    # Read bytes and validate size
     image_bytes = await file.read()
     if len(image_bytes) == 0:
         raise HTTPException(
@@ -84,10 +86,29 @@ async def analyze_pothole_image(
             detail=f"Image file exceeds maximum allowable size of 15MB ({len(image_bytes)/(1024*1024):.1f}MB).",
         )
 
+    # Resolve target road if specified
+    target_road = None
+    if road_id:
+        target_road = db.query(Road).filter(Road.id == road_id).first()
+    if not target_road:
+        target_road = db.query(Road).first()
+
+    road_name = target_road.name if target_road else "General Corridor"
+    road_type = target_road.road_type if target_road else "urban_arterial"
+    traffic_exp = target_road.traffic_exposure if target_road else "HIGH"
+
+    assigned_lat = latitude if latitude is not None else (target_road.latitude if target_road else 13.0827)
+    assigned_lng = longitude if longitude is not None else (target_road.longitude if target_road else 80.2707)
+
     try:
         result = pothole_service.analyze_image(
             image_bytes=image_bytes,
             filename=file.filename or "upload.jpg",
+            road_id=target_road.id if target_road else None,
+            road_type=road_type,
+            traffic_exposure=traffic_exp,
+            custom_lat=assigned_lat,
+            custom_lng=assigned_lng,
         )
     except Exception as e:
         raise HTTPException(
@@ -95,46 +116,69 @@ async def analyze_pothole_image(
             detail=f"Failed to process image with YOLO vision pipeline: {str(e)}",
         )
 
-    # Associate with road and persist Hazard to DB
     hazard_id = None
-    target_road = None
-
-    if road_id:
-        target_road = db.query(Road).filter(Road.id == road_id).first()
-    if not target_road:
-        target_road = db.query(Road).first()
-
     if target_road:
-        road_id = target_road.id
-        road_name = target_road.name
-
-        # If pothole detected (or in demo mode with anomaly detected)
         if result.pothole_count > 0:
             hazard = Hazard(
                 road_id=target_road.id,
                 type="pothole",
-                severity=result.severity,
+                severity=result.contextual_severity,
+                visual_severity=result.visual_severity,
+                contextual_severity=result.contextual_severity,
                 confidence=result.confidence,
                 risk_score=result.risk_score,
-                latitude=target_road.latitude + random.uniform(-0.0005, 0.0005),
-                longitude=target_road.longitude + random.uniform(-0.0005, 0.0005),
+                latitude=assigned_lat + random.uniform(-0.0003, 0.0003),
+                longitude=assigned_lng + random.uniform(-0.0003, 0.0003),
                 detected_at=datetime.utcnow(),
                 status="active",
+                evidence_id=result.evidence_id,
+                evidence_code=result.evidence_id,
+                source="Local YOLOv8 Inference" if not result.is_demo_mode else "Demo AI Mode (Optical Scanner)",
+                direction="Monitored Lane",
             )
             db.add(hazard)
+            db.flush()
+            hazard_id = hazard.id
 
-            # Update road risk score if this hazard introduces higher risk
+            # Register Evidence File
+            from backend.models import EvidenceFile, AuditLog
+            evidence_rec = EvidenceFile(
+                evidence_code=result.evidence_id,
+                road_id=target_road.id,
+                hazard_id=hazard_id,
+                file_type="IMAGE",
+                file_url=result.processed_image_url,
+                thumbnail_url=result.processed_image_url,
+                captured_at=datetime.utcnow(),
+                metadata_json={
+                    "pothole_count": result.pothole_count,
+                    "confidence": result.confidence,
+                    "visual_severity": result.visual_severity,
+                    "contextual_severity": result.contextual_severity,
+                    "model_status": result.model_status,
+                },
+                verified=False,
+                notes=f"YOLO detection on {target_road.name}: {result.pothole_count} defect(s) found.",
+            )
+            db.add(evidence_rec)
+
+            # Audit Trail
+            audit_entry = AuditLog(
+                actor="AI_POTHOLE_INFERENCE",
+                action="POTHOLE_DEFECT_REGISTERED",
+                target_type="RoadSegment",
+                target_id=target_road.id,
+                details=f"Pothole defect #{hazard_id} registered with code {result.evidence_id}. Risk: {result.risk_score}",
+            )
+            db.add(audit_entry)
+
+            # Update road risk score if this defect introduces higher risk
             if result.risk_score > target_road.risk_score:
-                target_road.risk_score = min(round((target_road.risk_score * 0.7) + (result.risk_score * 0.3), 1), 100.0)
+                target_road.risk_score = min(round((target_road.risk_score * 0.65) + (result.risk_score * 0.35), 1), 100.0)
                 target_road.safe_city_score = max(round(100.0 - target_road.risk_score, 1), 0.0)
 
             db.commit()
-            db.refresh(hazard)
-            hazard_id = hazard.id
-    else:
-        road_name = "Unassigned Segment"
 
-    # Convert to Pydantic output
     detections_out = [
         PotholeDetectionItemOut(
             box=BoundingBoxOut(**d.box.to_dict()),
@@ -154,6 +198,8 @@ async def analyze_pothole_image(
         model_path=result.model_path,
         pothole_count=result.pothole_count,
         confidence=result.confidence,
+        visual_severity=result.visual_severity,
+        contextual_severity=result.contextual_severity,
         severity=result.severity,
         risk_score=result.risk_score,
         risk_formula=result.risk_formula,
@@ -161,8 +207,15 @@ async def analyze_pothole_image(
         original_image_url=result.original_image_url,
         processed_image_url=result.processed_image_url,
         hazard_id=hazard_id,
-        road_id=road_id,
+        road_id=target_road.id if target_road else None,
         road_name=road_name,
+        evidence_id=result.evidence_id,
+        latitude=assigned_lat,
+        longitude=assigned_lng,
+        gps_accuracy=result.gps_accuracy,
+        is_simulated_gps=result.is_simulated_gps,
+        timestamp=result.timestamp,
+        disclaimer=result.disclaimer,
     )
 
 
@@ -170,11 +223,15 @@ async def analyze_pothole_image(
 async def analyze_traffic_video(
     file: UploadFile = File(...),
     junction_id: Optional[int] = Form(None),
+    road_id: Optional[int] = Form(None),
+    ttc_threshold: Optional[float] = Form(2.0),
+    apply_privacy: Optional[bool] = Form(True),
     db: Session = Depends(get_db),
 ):
     """
     Upload traffic video (MP4/MOV/AVI) -> Extract frames -> YOLOv8 + ByteTrack tracking ->
-    Compute TTC -> Flag AI-assisted near misses -> Persist to DB -> Return analysis.
+    Compute approximate TTC & PET -> Flag surrogate safety conflicts ->
+    Apply privacy masking (face/plate blurring) -> Persist to DB -> Return analysis.
     """
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_VIDEO_EXTENSIONS:
@@ -200,6 +257,9 @@ async def analyze_traffic_video(
             video_bytes=video_bytes,
             filename=file.filename or "traffic.mp4",
             junction_id=junction_id,
+            road_id=road_id,
+            ttc_threshold=ttc_threshold or 2.0,
+            apply_privacy=bool(apply_privacy),
         )
     except Exception as e:
         raise HTTPException(
@@ -207,34 +267,86 @@ async def analyze_traffic_video(
             detail=f"Failed to process video with traffic analytics pipeline: {str(e)}",
         )
 
-    # Persist detected near misses to Junction in database
     created_nm_ids: List[int] = []
     target_junction = None
+    target_road = None
 
     if junction_id:
         target_junction = db.query(Junction).filter(Junction.id == junction_id).first()
     if not target_junction:
         target_junction = db.query(Junction).first()
 
-    junction_name = target_junction.name if target_junction else "General Junction"
+    if road_id:
+        target_road = db.query(Road).filter(Road.id == road_id).first()
+    if not target_road and target_junction:
+        target_road = db.query(Road).first()
+
+    junction_name = target_junction.name if target_junction else "Monitored Junction"
     assigned_junction_id = target_junction.id if target_junction else None
+    assigned_road_id = target_road.id if target_road else (target_junction.id if target_junction else 1)
 
     for nm in result.near_misses:
         nm_record = NearMiss(
             junction_id=assigned_junction_id,
+            road_id=assigned_road_id,
+            video_id=file.filename,
             timestamp=datetime.utcnow() - timedelta(seconds=max(result.duration_seconds - nm.timestamp_seconds, 0)),
             object_types=nm.object_types,
+            object_type_a=nm.object_type_a,
+            object_type_b=nm.object_type_b,
             ttc=nm.ttc,
+            pet=nm.pet,
+            minimum_distance=nm.minimum_distance,
             risk_level=nm.risk_level,
+            event_severity=nm.event_severity,
             conflict_zone=nm.conflict_zone,
+            direction=nm.direction,
+            evidence_clip=nm.snapshot_url,
+            confidence=nm.confidence,
+            source="YOLOv8 + ByteTrack (Local Edge)",
+            review_status="pending_review",
         )
         db.add(nm_record)
         db.flush()
         created_nm_ids.append(nm_record.id)
 
+        # Store Evidence file for each conflict snapshot
+        if nm.snapshot_url:
+            from backend.models import EvidenceFile
+            ev_code = f"EV-NM-{nm_record.id:04d}"
+            ev_file = EvidenceFile(
+                evidence_code=ev_code,
+                road_id=assigned_road_id,
+                conflict_id=nm_record.id,
+                file_type="KEYFRAME",
+                file_url=nm.snapshot_url,
+                thumbnail_url=nm.snapshot_url,
+                captured_at=datetime.utcnow(),
+                metadata_json={
+                    "ttc": nm.ttc,
+                    "pet": nm.pet,
+                    "minimum_distance": nm.minimum_distance,
+                    "conflict_zone": nm.conflict_zone,
+                    "object_types": nm.object_types,
+                },
+                verified=False,
+                notes=f"Surrogate safety conflict candidate between {nm.object_type_a} and {nm.object_type_b} (TTC ~{nm.ttc:.2f}s).",
+            )
+            db.add(ev_file)
+
     if target_junction and result.near_misses:
-        # Update junction risk score
         target_junction.risk_score = min(round(target_junction.risk_score + len(result.near_misses) * 2.5, 1), 98.0)
+
+    # Log to audit trail
+    if result.near_misses:
+        from backend.models import AuditLog
+        db.add(AuditLog(
+            actor="AI_TRAFFIC_TRACKER",
+            action="CONFLICT_EVENTS_FLAGGED",
+            target_type="Junction",
+            target_id=assigned_junction_id,
+            details=f"Flagged {len(result.near_misses)} near-miss candidate(s) at {junction_name}. Privacy masking: {apply_privacy}",
+        ))
 
     db.commit()
 
@@ -243,13 +355,22 @@ async def analyze_traffic_video(
             conflict_id=nm.conflict_id,
             timestamp_str=nm.timestamp_str,
             timestamp_seconds=nm.timestamp_seconds,
+            object_type_a=nm.object_type_a,
+            object_type_b=nm.object_type_b,
             object_types=nm.object_types,
             track_ids=nm.track_ids,
             ttc=nm.ttc,
+            pet=nm.pet,
+            minimum_distance=nm.minimum_distance,
             risk_level=nm.risk_level,
+            event_severity=nm.event_severity,
             conflict_zone=nm.conflict_zone,
+            direction=nm.direction,
             frame_index=nm.frame_index,
+            confidence=nm.confidence,
             snapshot_url=nm.snapshot_url,
+            review_status=nm.review_status,
+            disclaimer=nm.disclaimer,
         )
         for nm in result.near_misses
     ]
@@ -260,6 +381,7 @@ async def analyze_traffic_video(
         status_message=result.status_message,
         junction_id=assigned_junction_id,
         junction_name=junction_name,
+        road_id=assigned_road_id,
         duration_seconds=result.duration_seconds,
         total_frames=result.total_frames,
         processed_frames=result.processed_frames,
@@ -271,6 +393,9 @@ async def analyze_traffic_video(
         processed_video_url=result.processed_video_url,
         conflict_snapshots=result.conflict_snapshots,
         created_near_miss_ids=created_nm_ids,
+        privacy_applied=result.privacy_applied,
+        privacy_notice=result.privacy_notice,
+        tracked_objects_summary=result.tracked_objects_summary,
     )
 
 

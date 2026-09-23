@@ -13,6 +13,9 @@ import InterventionImpact from '@/pages/InterventionImpact'
 import Settings from '@/pages/Settings'
 import LandingPage from '@/pages/LandingPage'
 import SmartJunctionBillboard from '@/pages/SmartJunctionBillboard'
+import RoadIntelligence from '@/pages/RoadIntelligence'
+import TrafficConflicts from '@/pages/TrafficConflicts'
+import EvidenceAudit from '@/pages/EvidenceAudit'
 import Privacy from '@/pages/Privacy'
 
 export default function App() {
@@ -20,6 +23,9 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Overview />} />
+        <Route path="/road-intelligence" element={<RoadIntelligence />} />
+        <Route path="/traffic-conflicts" element={<TrafficConflicts />} />
+        <Route path="/evidence" element={<EvidenceAudit />} />
         <Route path="/map" element={<SafeCityMap />} />
         <Route path="/ai-vision" element={<AIVision />} />
         <Route path="/danger-zones" element={<DangerZones />} />

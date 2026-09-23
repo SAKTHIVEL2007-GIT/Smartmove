@@ -3,7 +3,7 @@ import Layout from '@/components/layout/Layout'
 import DemoDataBanner from '@/components/ui/DemoDataBanner'
 import RiskBadge from '@/components/ui/RiskBadge'
 import StatusBadge from '@/components/ui/StatusBadge'
-import { useCitizenReports, useSubmitReport, useRoads } from '@/hooks/useApi'
+import { useCitizenReports, useSubmitReport, useRoads, useUpdateReportStatus } from '@/hooks/useApi'
 import type { RiskLevel, CitizenReport } from '@/types'
 
 const HAZARD_TYPES = [
@@ -25,6 +25,7 @@ export default function CitizenReports() {
   const { data: reports = [], isLoading } = useCitizenReports()
   const { data: roads = [] } = useRoads()
   const { mutate: submit, isPending, isError } = useSubmitReport()
+  const updateStatusMutation = useUpdateReportStatus()
 
   const [form, setForm] = useState({
     reporter_name: '',
@@ -365,12 +366,44 @@ export default function CitizenReports() {
                         <p className="text-xs text-gray-300 mt-1 line-clamp-2">{r.description}</p>
                       )}
 
-                      <div className="flex items-center justify-between gap-2 mt-2 pt-1.5 border-t border-gray-800/80 text-[11px] text-gray-500">
-                        <span>Reported by: <strong className="text-gray-300">{r.reporter_name || 'Anonymous'}</strong></span>
-                        {r.latitude && r.longitude && (
-                          <span className="font-mono">{r.latitude.toFixed(4)}° N, {r.longitude.toFixed(4)}° W</span>
-                        )}
-                        <span>{new Date(r.submitted_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
+                      {/* Municipal Verification Controls */}
+                      <div className="flex items-center justify-between gap-2 mt-2 pt-1.5 border-t border-gray-800/80 text-[11px]">
+                        <div className="flex items-center gap-1.5">
+                          {r.status !== 'Converted to Hazard' && r.status !== 'Verified' && (
+                            <>
+                              <button
+                                onClick={() => updateStatusMutation.mutate({ id: r.id, status: 'Converted to Hazard', notes: 'Verified by field inspector' })}
+                                className="px-2 py-0.5 bg-emerald-800/80 hover:bg-emerald-700 text-emerald-100 rounded text-[10px] font-semibold transition"
+                              >
+                                ✓ Convert to Hazard
+                              </button>
+                              <button
+                                onClick={() => updateStatusMutation.mutate({ id: r.id, status: 'Under Review' })}
+                                className="px-2 py-0.5 bg-amber-800/60 hover:bg-amber-700 text-amber-200 rounded text-[10px] transition"
+                              >
+                                👁 Under Review
+                              </button>
+                              <button
+                                onClick={() => updateStatusMutation.mutate({ id: r.id, status: 'Rejected' })}
+                                className="px-2 py-0.5 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded text-[10px] transition"
+                              >
+                                ✕ Reject
+                              </button>
+                            </>
+                          )}
+                          {(r.status === 'Converted to Hazard' || r.status === 'Verified') && (
+                            <span className="text-[10px] font-mono text-emerald-400 font-semibold">
+                              ✓ AI & Officer Verified Hazard Linked
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="text-gray-500 text-[10px]">
+                          {r.latitude && r.longitude && (
+                            <span className="font-mono">{r.latitude.toFixed(4)}°, {r.longitude.toFixed(4)}° • </span>
+                          )}
+                          <span>{new Date(r.submitted_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
+                        </div>
                       </div>
                     </div>
                   </div>

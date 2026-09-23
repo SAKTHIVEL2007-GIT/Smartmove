@@ -5,6 +5,7 @@ import type {
   PotholeAnalysisResult, TrafficAnalysisResult, AIModelStatus, AIEvent,
   RoadSafetyEvaluation, PrioritizedRepairItem, MunicipalRepairStatus,
   RouteComparisonResult, SmartJunctionDisplayState,
+  RoadSegmentDossier, EvidenceFile, AuditLog, NearMiss, DecisionAuditRecord,
 } from '@/types'
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -57,13 +58,21 @@ export function useRepairPriority() {
 
 export function useUpdateRepairStatus() {
   const queryClient = useQueryClient()
-  return useMutation<PrioritizedRepairItem, Error, { id: number; status: MunicipalRepairStatus; assigned_to?: string }>({
-    mutationFn: async ({ id, status, assigned_to }) =>
-      (await api.patch(`/api/repairs/${id}`, { status, assigned_to })).data,
+  return useMutation<
+    PrioritizedRepairItem,
+    Error,
+    { id: number; status?: MunicipalRepairStatus; action?: string; assigned_to?: string; notes?: string; reviewer?: string }
+  >({
+    mutationFn: async ({ id, status, action, assigned_to, notes, reviewer }) =>
+      (await api.patch(`/api/repairs/${id}`, { status: status || 'NEW', action, assigned_to, notes, reviewer })).data,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['repair-priority'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
       queryClient.invalidateQueries({ queryKey: ['danger-zones'] })
+      queryClient.invalidateQueries({ queryKey: ['roads'] })
+      queryClient.invalidateQueries({ queryKey: ['interventions'] })
+      queryClient.invalidateQueries({ queryKey: ['audit-logs'] })
+      queryClient.invalidateQueries({ queryKey: ['decision-audits'] })
     },
   })
 }
@@ -133,6 +142,23 @@ export function useSubmitReport() {
       queryClient.invalidateQueries({ queryKey: ['citizen-reports'] })
       queryClient.invalidateQueries({ queryKey: ['hazards'] })
       queryClient.invalidateQueries({ queryKey: ['danger-zones'] })
+      queryClient.invalidateQueries({ queryKey: ['audit-logs'] })
+    },
+  })
+}
+
+export function useUpdateReportStatus() {
+  const queryClient = useQueryClient()
+  return useMutation<CitizenReport, Error, { id: number; status: string; notes?: string }>({
+    mutationFn: async ({ id, status, notes }) =>
+      (await api.patch(`/api/reports/${id}/status`, { status, notes })).data,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['citizen-reports'] })
+      queryClient.invalidateQueries({ queryKey: ['hazards'] })
+      queryClient.invalidateQueries({ queryKey: ['danger-zones'] })
+      queryClient.invalidateQueries({ queryKey: ['roads'] })
+      queryClient.invalidateQueries({ queryKey: ['audit-logs'] })
+      queryClient.invalidateQueries({ queryKey: ['decision-audits'] })
     },
   })
 }
@@ -155,12 +181,18 @@ export function useAIEvents() {
 
 export function useAnalyzePothole() {
   const queryClient = useQueryClient()
-  return useMutation<PotholeAnalysisResult, Error, { file: File; road_id?: number }>({
-    mutationFn: async ({ file, road_id }) => {
+  return useMutation<PotholeAnalysisResult, Error, { file: File; road_id?: number; latitude?: number; longitude?: number }>({
+    mutationFn: async ({ file, road_id, latitude, longitude }) => {
       const formData = new FormData()
       formData.append('file', file)
       if (road_id !== undefined && road_id !== null) {
         formData.append('road_id', road_id.toString())
+      }
+      if (latitude !== undefined && latitude !== null) {
+        formData.append('latitude', latitude.toString())
+      }
+      if (longitude !== undefined && longitude !== null) {
+        formData.append('longitude', longitude.toString())
       }
       const response = await api.post('/api/potholes/analyze', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -173,19 +205,29 @@ export function useAnalyzePothole() {
       queryKeyRefetch(queryClient, 'roads')
       queryKeyRefetch(queryClient, 'ai-events')
       queryKeyRefetch(queryClient, 'danger-zones')
+      queryKeyRefetch(queryClient, 'road-intelligence')
+      queryKeyRefetch(queryClient, 'evidence')
+      queryKeyRefetch(queryClient, 'audit-logs')
     },
   })
 }
 
 export function useAnalyzeTraffic() {
   const queryClient = useQueryClient()
-  return useMutation<TrafficAnalysisResult, Error, { file: File; junction_id?: number }>({
-    mutationFn: async ({ file, junction_id }) => {
+  return useMutation<TrafficAnalysisResult, Error, { file: File; junction_id?: number; road_id?: number; ttc_threshold?: number; apply_privacy?: boolean }>({
+    mutationFn: async ({ file, junction_id, road_id, ttc_threshold, apply_privacy = true }) => {
       const formData = new FormData()
       formData.append('file', file)
       if (junction_id !== undefined && junction_id !== null) {
         formData.append('junction_id', junction_id.toString())
       }
+      if (road_id !== undefined && road_id !== null) {
+        formData.append('road_id', road_id.toString())
+      }
+      if (ttc_threshold !== undefined && ttc_threshold !== null) {
+        formData.append('ttc_threshold', ttc_threshold.toString())
+      }
+      formData.append('apply_privacy', apply_privacy.toString())
       const response = await api.post('/api/traffic/analyze', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
@@ -194,12 +236,85 @@ export function useAnalyzeTraffic() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
       queryKeyRefetch(queryClient, 'junctions')
+      queryKeyRefetch(queryClient, 'conflicts')
+      queryKeyRefetch(queryClient, 'conflict-hotspots')
       queryKeyRefetch(queryClient, 'ai-events')
       queryKeyRefetch(queryClient, 'danger-zones')
+      queryKeyRefetch(queryClient, 'road-intelligence')
+      queryKeyRefetch(queryClient, 'evidence')
+      queryKeyRefetch(queryClient, 'audit-logs')
     },
+  })
+}
+
+// ── Road Intelligence ─────────────────────────────────────────────────────────
+export function useRoadSegments() {
+  return useQuery<Road[]>({
+    queryKey: ['road-intelligence'],
+    queryFn: async () => (await api.get('/api/road-intelligence')).data,
+  })
+}
+
+export function useRoadSegmentDossier(segmentId: number | null) {
+  return useQuery<RoadSegmentDossier>({
+    queryKey: ['road-intelligence', segmentId],
+    queryFn: async () => (await api.get(`/api/road-intelligence/${segmentId}`)).data,
+    enabled: segmentId !== null,
+  })
+}
+
+// ── Traffic Conflicts ─────────────────────────────────────────────────────────
+export function useConflicts(params?: { road_id?: number; risk_level?: string; review_status?: string }) {
+  return useQuery<NearMiss[]>({
+    queryKey: ['conflicts', params],
+    queryFn: async () => (await api.get('/api/conflicts', { params })).data,
+  })
+}
+
+export function useConflictHotspots() {
+  return useQuery<any[]>({
+    queryKey: ['conflict-hotspots'],
+    queryFn: async () => (await api.get('/api/conflicts/hotspots')).data,
+  })
+}
+
+export function useReviewConflict() {
+  const queryClient = useQueryClient()
+  return useMutation<NearMiss, Error, { eventId: number; review_status: string; notes?: string }>({
+    mutationFn: async ({ eventId, review_status, notes }) =>
+      (await api.patch(`/api/conflicts/${eventId}/review`, { review_status, notes })).data,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['conflicts'] })
+      queryClient.invalidateQueries({ queryKey: ['conflict-hotspots'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['road-intelligence'] })
+    },
+  })
+}
+
+// ── Evidence & Audit Logs ─────────────────────────────────────────────────────
+export function useEvidence(params?: { road_id?: number; file_type?: string }) {
+  return useQuery<EvidenceFile[]>({
+    queryKey: ['evidence', params],
+    queryFn: async () => (await api.get('/api/evidence', { params })).data,
+  })
+}
+
+export function useAuditLogs(limit?: number) {
+  return useQuery<AuditLog[]>({
+    queryKey: ['audit-logs', limit],
+    queryFn: async () => (await api.get('/api/audit-logs', { params: { limit } })).data,
+  })
+}
+
+export function useDecisionAudits() {
+  return useQuery<DecisionAuditRecord[]>({
+    queryKey: ['decision-audits'],
+    queryFn: async () => (await api.get('/api/evidence/decisions')).data,
   })
 }
 
 function queryKeyRefetch(client: any, key: string) {
   client.invalidateQueries({ queryKey: [key] })
 }
+

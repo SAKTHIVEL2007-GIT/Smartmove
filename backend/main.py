@@ -15,7 +15,8 @@ from backend.database import Base, engine, SessionLocal
 import backend.models  # Ensures all ORM models are registered with Base.metadata
 from backend.routers import (
     dashboard, roads, hazards, danger_zones, repair,
-    junctions, interventions, reports, ai_vision, routes
+    junctions, interventions, reports, ai_vision, routes,
+    road_intelligence, conflicts, evidence
 )
 from backend.seed import seed_all
 
@@ -70,6 +71,9 @@ app.include_router(interventions.router, prefix="/api", tags=["Interventions"])
 app.include_router(reports.router, prefix="/api", tags=["Reports"])
 app.include_router(ai_vision.router, prefix="/api", tags=["AI Vision"])
 app.include_router(routes.router, prefix="/api", tags=["Routes"])
+app.include_router(road_intelligence.router, prefix="/api", tags=["Road Intelligence"])
+app.include_router(conflicts.router, prefix="/api", tags=["Traffic Conflicts"])
+app.include_router(evidence.router, prefix="/api", tags=["Evidence & Audit"])
 
 
 @app.get("/", tags=["Health"])

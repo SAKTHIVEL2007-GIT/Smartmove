@@ -2,12 +2,13 @@
 SafeCity Loop V2 — Repair Decision Engine
 Prioritizes road maintenance and explains WHY each road is prioritized.
 Factors: severity, traffic exposure, vulnerability, near misses, repeated reports, persistence.
+Includes rule-based intervention recommendations and evidence tracking.
 """
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional, Dict
 from sqlalchemy.orm import Session
-from backend.models import Road, Hazard, NearMiss, Junction, Repair, CitizenReport
+from backend.models import Road, Hazard, NearMiss, Junction, Repair, CitizenReport, EvidenceFile
 
 
 @dataclass
@@ -20,9 +21,13 @@ class PrioritizedRepairItem:
     urgency_score: float         # 0–100
     hazard_summary: str          # e.g. "2 Potholes (1 Critical)"
     risk_score: float
-    status: str                  # New / Verified / High Priority / Assigned / Under Repair / Completed
+    status: str                  # NEW / UNDER REVIEW / VERIFIED / REPAIR ASSIGNED / REPAIRED / POST-REPAIR MONITORING / CLOSED
     assigned_to: Optional[str]
-    reasons: List[str]           # Explanations of WHY road is prioritized
+    reasons: List[str]           # Detailed list of explanations
+    reason: str                  # Synthesized main reason string
+    suggested_action: str        # Rule-based intervention suggestion
+    evidence_ids: List[str]      # Linked chain-of-custody evidence codes
+    human_approval_required: bool = True
     created_at: Optional[datetime] = None
 
     def to_dict(self) -> dict:
@@ -38,14 +43,19 @@ class PrioritizedRepairItem:
             "status": self.status,
             "assigned_to": self.assigned_to,
             "reasons": self.reasons,
+            "reason": self.reason,
+            "suggested_action": self.suggested_action,
+            "evidence_ids": self.evidence_ids,
+            "human_approval_required": self.human_approval_required,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
 
 class RepairDecisionEngine:
     """
-    AI-driven repair prioritization engine.
-    Analyzes active hazards, traffic, vulnerability, and incident persistence to rank repairs with clear rationales.
+    AI-driven municipal repair prioritization engine.
+    Analyzes active hazards, traffic, vulnerability, near-miss conflicts, and persistence to rank repairs with clear rationales.
+    Adheres strictly to: Human approval is mandatory. AI provides decision-support only.
     """
 
     EXPOSURE_POINTS = {"HIGH": 25.0, "MEDIUM": 15.0, "LOW": 5.0}
@@ -148,17 +158,65 @@ class RepairDecisionEngine:
         else:
             hazard_summary = "Routine Maintenance"
 
-        status = repair.status if repair else ("New" if hazards else "Completed")
-        # Normalize status to prompt statuses
-        status_map = {
-            "pending": "New",
-            "in-progress": "Under Repair",
-            "completed": "Completed",
-            "assigned": "Assigned",
-            "verified": "Verified",
-            "high-priority": "High Priority",
+        # Rule-based Suggested Intervention
+        if critical_potholes or high_potholes:
+            if "school" in road.name.lower() or road.vulnerability.upper() == "HIGH":
+                suggested_action = "Road-surface inspection + pedestrian-safety review"
+            elif len(potholes) >= 2:
+                suggested_action = "Asphalt resurfacing inspection + pothole patching"
+            else:
+                suggested_action = "Pothole patching"
+        elif near_miss_count > 0:
+            if "school" in road.name.lower() or road.vulnerability.upper() == "HIGH":
+                suggested_action = "Pedestrian crossing review + speed-calming review"
+            else:
+                suggested_action = "Traffic-signal review + road-marking review"
+        elif reports_count > 0:
+            suggested_action = "Drainage inspection + surface sweep"
+        else:
+            suggested_action = "Routine lighting & road-marking inspection"
+
+        # Synthesized main reason
+        if critical_potholes and near_miss_count > 0:
+            main_reason = "High hazard severity + high pedestrian exposure + repeated conflicts."
+        elif critical_potholes:
+            main_reason = "High hazard severity with active surface structural depression."
+        elif near_miss_count > 0:
+            main_reason = "Elevated traffic conflict frequency and pedestrian exposure."
+        elif reasons:
+            main_reason = " + ".join(reasons[:2]) + "."
+        else:
+            main_reason = "Routine corridor maintenance monitoring."
+
+        # Collect Evidence IDs
+        evidence_files = db.query(EvidenceFile).filter(EvidenceFile.road_id == road.id).all()
+        evidence_ids = [ef.evidence_code for ef in evidence_files if ef.evidence_code]
+        for h in hazards:
+            if getattr(h, "evidence_code", None) and h.evidence_code not in evidence_ids:
+                evidence_ids.append(h.evidence_code)
+        if not evidence_ids:
+            evidence_ids = [f"SC-H-00{road.id:02d}"]
+
+        # Normalize status to standard municipal statuses
+        current_status = repair.status if repair else ("NEW" if hazards else "CLOSED")
+        status_norm_map = {
+            "pending": "NEW",
+            "new": "NEW",
+            "under review": "UNDER REVIEW",
+            "under_review": "UNDER REVIEW",
+            "verified": "VERIFIED",
+            "high-priority": "UNDER REVIEW",
+            "assigned": "REPAIR ASSIGNED",
+            "repair assigned": "REPAIR ASSIGNED",
+            "in-progress": "REPAIR ASSIGNED",
+            "under repair": "UNDER REVIEW",
+            "repaired": "REPAIRED",
+            "completed": "REPAIRED",
+            "post-repair monitoring": "POST-REPAIR MONITORING",
+            "closed": "CLOSED",
+            "rejected": "CLOSED",
         }
-        status = status_map.get(status.lower(), status)
+        normalized_status = status_norm_map.get(current_status.lower().strip(), current_status.upper())
 
         return PrioritizedRepairItem(
             road_id=road.id,
@@ -169,18 +227,23 @@ class RepairDecisionEngine:
             urgency_score=urgency_score,
             hazard_summary=hazard_summary,
             risk_score=road.risk_score,
-            status=status,
-            assigned_to=repair.assigned_to if repair else "Maintenance Team A [DEMO]",
+            status=normalized_status,
+            assigned_to=repair.assigned_to if repair else "Municipal Public Works [DEMO]",
             reasons=reasons,
+            reason=main_reason,
+            suggested_action=suggested_action,
+            evidence_ids=evidence_ids,
+            human_approval_required=True,
             created_at=repair.created_at if repair else None,
         )
 
     def generate_repair_queue(self, db: Session) -> List[PrioritizedRepairItem]:
         roads = db.query(Road).all()
         items = [self.compute_road_priority(r, db) for r in roads]
-        # Sort descending by urgency score
         items.sort(key=lambda x: x.urgency_score, reverse=True)
-        # Assign 1-indexed ranks
         for idx, item in enumerate(items, start=1):
             item.priority_rank = idx
         return items
+
+
+decision_engine = RepairDecisionEngine()
