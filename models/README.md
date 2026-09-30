@@ -37,3 +37,35 @@ If no custom pothole weights file is present at `MODEL_PATH`:
   - `cyclist` (Bicycles)
   - `motorcycle` (Motorcycles)
 - The model runs 100% locally on CPU/GPU to track centroids, project trajectories, and calculate Time-To-Collision (TTC).
+
+---
+
+## 3. Water Accumulation Segmentation Model (`WATER_MODEL_PATH`)
+
+- **Default path:** `models/water_segmentation.pt`
+- **Environment variable:** `WATER_MODEL_PATH` in `.env`
+- **Task:** Instance Segmentation (`yolov8n-seg` / `yolov8s-seg`)
+
+### How to configure & train:
+1. **Model Placement**:
+   Place your trained Ultralytics YOLOv8 segmentation weights file into:
+   ```
+   models/water_segmentation.pt
+   ```
+2. **Dataset Annotation & Training**:
+   - **Task type**: Polygon segmentation (`segment`)
+   - **Recommended Classes**:
+     - `0: water_accumulation` (Standing water puddles / waterlogging)
+     - `1: wet_road` (Wet asphalt without standing water pools)
+     - `2: dry_road` (Normal dry pavement)
+     - `3: shadow` (Dark ambient tree/building shadows)
+     - `4: reflection` (Specular windshield/headlight glints)
+   - **Ultralytics Training Command**:
+     ```bash
+     yolo task=segment mode=train model=yolov8n-seg.pt data=datasets/water/data.yaml epochs=50 imgsz=640
+     ```
+3. **Fallback Optical Segmenter Mode**:
+   - If no custom weights file is present at `models/water_segmentation.pt`:
+   - The backend runs an **Optical Water-Region Segmenter** (isolating visible ground ROI, specular sheen contrast, texture variance, and HSV water profile).
+   - Results are explicitly badged with `[PROTOTYPE]` and `is_demo_mode: true` in API outputs and Model Status Panels so uncalibrated prototype outputs are never faked as trained AI inference.
+

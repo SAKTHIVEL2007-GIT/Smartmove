@@ -561,9 +561,69 @@ class AIModelStatusOut(BaseModel):
     pothole_model_loaded: bool
     traffic_model_path: str
     traffic_model_loaded: bool
+    water_model_path: Optional[str] = "models/water_segmentation.pt"
+    water_model_loaded: Optional[bool] = False
     is_pothole_demo_mode: bool
     is_traffic_demo_mode: bool
+    is_water_demo_mode: Optional[bool] = True
     message: str
+
+
+# ── Water Accumulation Analysis Schemas ──────────────────────────────────────
+
+class WaterRegionBoxOut(BaseModel):
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+
+
+class WaterRegionItemOut(BaseModel):
+    id: int
+    area_pixels: int
+    area_percent: float
+    confidence: float
+    severity: str
+    box: WaterRegionBoxOut
+    polygon: List[List[int]] = []
+    description: Optional[str] = None
+
+
+class CombinedHazardOut(BaseModel):
+    detected: bool = True
+    pothole_count: int
+    pothole_severity: str
+    water_severity: str
+    combined_risk_score: float
+    obscured_hazard_warning: str
+    interaction_factor: float = 1.2
+
+
+class WaterAnalysisOut(BaseModel):
+    success: bool = True
+    image_id: Optional[str] = None
+    hazard_type: str = "water_accumulation"
+    detected: bool
+    confidence: float
+    severity: str
+    water_area_percent: float
+    road_area_pixels: Optional[int] = 0
+    water_area_pixels: Optional[int] = 0
+    regions: List[WaterRegionItemOut] = []
+    risk_contribution: float
+    processed_image_url: str
+    mask_image_url: str
+    is_demo_mode: bool
+    model_status: str
+    depth_label: str = "Not available from RGB image"
+    combined_hazard: Optional[CombinedHazardOut] = None
+    hazard_id: Optional[int] = None
+    road_id: Optional[int] = None
+    road_name: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    timestamp: Optional[str] = None
+
 
 
 # ── Danger Zones & Repairs ────────────────────────────────────────────────────

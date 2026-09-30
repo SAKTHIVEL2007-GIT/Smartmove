@@ -7,6 +7,7 @@ import type {
   RouteComparisonResult, SmartJunctionDisplayState,
   RoadSegmentDossier, EvidenceFile, AuditLog, NearMiss, DecisionAuditRecord,
   RiskEvaluationResult, InterventionSimulationResult, InterventionComparisonResult,
+  WaterAnalysisResult,
 } from '@/types'
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -199,6 +200,57 @@ export function useAnalyzePothole() {
         formData.append('is_demo_sample', is_demo_sample.toString())
       }
       const response = await api.post('/api/potholes/analyze', formData, {
+        headers: { 'Content-Type': undefined },
+        timeout: 120_000,
+      })
+      return response.data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryKeyRefetch(queryClient, 'hazards')
+      queryKeyRefetch(queryClient, 'roads')
+      queryKeyRefetch(queryClient, 'ai-events')
+      queryKeyRefetch(queryClient, 'danger-zones')
+      queryKeyRefetch(queryClient, 'road-intelligence')
+      queryKeyRefetch(queryClient, 'evidence')
+      queryKeyRefetch(queryClient, 'audit-logs')
+    },
+  })
+}
+
+export function useAnalyzeWater() {
+  const queryClient = useQueryClient()
+  return useMutation<WaterAnalysisResult, Error, {
+    file: File;
+    road_id?: number;
+    latitude?: number;
+    longitude?: number;
+    has_potholes?: boolean;
+    pothole_severity?: string;
+    pothole_count?: number;
+  }>({
+    mutationFn: async ({ file, road_id, latitude, longitude, has_potholes, pothole_severity, pothole_count }) => {
+      const formData = new FormData()
+      formData.append('file', file)
+      if (road_id !== undefined && road_id !== null) {
+        formData.append('road_id', road_id.toString())
+      }
+      if (latitude !== undefined && latitude !== null) {
+        formData.append('latitude', latitude.toString())
+      }
+      if (longitude !== undefined && longitude !== null) {
+        formData.append('longitude', longitude.toString())
+      }
+      if (has_potholes !== undefined) {
+        formData.append('has_potholes', has_potholes.toString())
+      }
+      if (pothole_severity) {
+        formData.append('pothole_severity', pothole_severity)
+      }
+      if (pothole_count !== undefined) {
+        formData.append('pothole_count', pothole_count.toString())
+      }
+      const response = await api.post('/api/water/analyze', formData, {
         headers: { 'Content-Type': undefined },
         timeout: 120_000,
       })

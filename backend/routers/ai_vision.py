@@ -17,15 +17,18 @@ from backend.models import Road, Hazard, NearMiss, Junction
 from backend.schemas import (
     PotholeAnalysisOut, TrafficAnalysisOut, AIEvent, AIModelStatusOut,
     PotholeDetectionItemOut, BoundingBoxOut, TrafficConflictDetailOut,
-    PotholeVideoAnalysisOut, UniquePotholeTrackOut, PotholeVideoTimelineItemOut
+    PotholeVideoAnalysisOut, UniquePotholeTrackOut, PotholeVideoTimelineItemOut,
+    WaterAnalysisOut, WaterRegionItemOut, WaterRegionBoxOut, CombinedHazardOut
 )
 from backend.services.pothole_detection import PotholeDetectionService
 from backend.services.traffic_analysis import TrafficAnalysisService
+from backend.services.water_detection import WaterDetectionService
 
 router = APIRouter()
 
 pothole_service = PotholeDetectionService()
 traffic_service = TrafficAnalysisService()
+water_service = WaterDetectionService()
 
 MAX_IMAGE_SIZE = 15 * 1024 * 1024  # 15 MB
 MAX_VIDEO_SIZE = 50 * 1024 * 1024  # 50 MB
@@ -38,10 +41,12 @@ def get_ai_status():
     """Returns local model loading status and demo mode state."""
     p_loaded = pothole_service.is_configured()
     t_loaded = traffic_service.model is not None
+    w_loaded = water_service.is_configured()
 
     msg = (
-        "YOLOv8 Vision pipeline active." if p_loaded and t_loaded
-        else "YOLOv8 traffic detection active. Pothole detector running in Demo AI Mode (custom weights unconfigured)."
+        "All local AI models (Pothole, Traffic, Water Segmentation) active."
+        if p_loaded and t_loaded and w_loaded
+        else "Local AI Vision pipeline active with Optical Water-Region Segmenter."
     )
 
     return AIModelStatusOut(
@@ -49,10 +54,14 @@ def get_ai_status():
         pothole_model_loaded=p_loaded,
         traffic_model_path=traffic_service.model_path,
         traffic_model_loaded=t_loaded,
+        water_model_path=water_service.model_path,
+        water_model_loaded=w_loaded,
         is_pothole_demo_mode=not p_loaded,
         is_traffic_demo_mode=not t_loaded,
+        is_water_demo_mode=not w_loaded,
         message=msg,
     )
+
 
 
 @router.post("/potholes/analyze", response_model=PotholeAnalysisOut)
@@ -700,3 +709,181 @@ def get_ai_events(db: Session = Depends(get_db)):
             events.append(AIEvent(time=t, event=ev, type=tp, severity=sev))
 
     return events[:12]
+
+
+@router.post("/water/analyze", response_model=WaterAnalysisOut)
+async def analyze_water_image(
+    file: UploadFile = File(...),
+    road_id: Optional[int] = Form(None),
+    latitude: Optional[float] = Form(None),
+    longitude: Optional[float] = Form(None),
+    has_potholes: Optional[bool] = Form(False),
+    pothole_severity: Optional[str] = Form("NONE"),
+    pothole_count: Optional[int] = Form(0),
+    db: Session = Depends(get_db),
+):
+    """
+    Upload road image -> Run local YOLOv8 Segmentation / Optical Water Analyzer ->
+    Compute road water coverage %, multi-region puddles, severity, risk contribution ->
+    Save Hazard + Evidence File + Audit Log to DB -> Return structured result with visual overlay.
+    """
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported image extension '{ext}'. Allowed formats: JPG, JPEG, PNG, WEBP.",
+        )
+
+    image_bytes = await file.read()
+    if len(image_bytes) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded image file is empty.",
+        )
+    if len(image_bytes) > MAX_IMAGE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Image file exceeds maximum allowable size of 15MB ({len(image_bytes)/(1024*1024):.1f}MB).",
+        )
+
+    # Resolve target road
+    target_road = None
+    if road_id:
+        target_road = db.query(Road).filter(Road.id == road_id).first()
+    if not target_road:
+        target_road = db.query(Road).first()
+
+    assigned_lat = latitude if latitude is not None else (target_road.latitude if target_road else 13.0827)
+    assigned_lng = longitude if longitude is not None else (target_road.longitude if target_road else 80.2707)
+
+    try:
+        result = water_service.analyze_image(
+            image_bytes=image_bytes,
+            filename=file.filename or "water_upload.jpg",
+            road_id=target_road.id if target_road else None,
+            has_potholes=bool(has_potholes),
+            pothole_severity=str(pothole_severity or "NONE"),
+            pothole_count=int(pothole_count or 0),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Failed to process water accumulation analysis: {str(e)}",
+        )
+
+    hazard_id = None
+    if target_road and result.detected:
+        hazard = Hazard(
+            road_id=target_road.id,
+            type="water_accumulation",
+            severity=result.severity,
+            visual_severity=result.severity,
+            contextual_severity=result.severity,
+            confidence=result.confidence,
+            risk_score=result.risk_contribution,
+            latitude=assigned_lat + random.uniform(-0.0002, 0.0002),
+            longitude=assigned_lng + random.uniform(-0.0002, 0.0002),
+            detected_at=datetime.utcnow(),
+            status="active",
+            evidence_id=result.image_id,
+            evidence_code=result.image_id,
+            image_path=result.processed_image_url,
+            source="Local YOLOv8-seg Inference" if not result.is_demo_mode else "Optical Water-Region Analyzer",
+            direction="Monitored Lane",
+        )
+        db.add(hazard)
+        db.flush()
+        hazard_id = hazard.id
+
+        # Register Evidence File
+        from backend.models import EvidenceFile, AuditLog
+        evidence_rec = EvidenceFile(
+            evidence_code=result.image_id,
+            road_id=target_road.id,
+            hazard_id=hazard_id,
+            file_type="IMAGE",
+            file_url=result.processed_image_url,
+            thumbnail_url=result.mask_image_url,
+            captured_at=datetime.utcnow(),
+            metadata_json={
+                "water_area_percent": result.water_area_percent,
+                "confidence": result.confidence,
+                "severity": result.severity,
+                "regions_count": len(result.regions),
+                "is_demo_mode": result.is_demo_mode,
+            },
+            verified=False,
+            notes=f"Water accumulation detection on {target_road.name}: {result.water_area_percent:.1f}% road coverage ({result.severity}).",
+        )
+        db.add(evidence_rec)
+
+        # Audit Trail
+        audit_entry = AuditLog(
+            actor="AI_WATER_INFERENCE",
+            action="WATER_ACCUMULATION_REGISTERED",
+            target_type="RoadSegment",
+            target_id=target_road.id,
+            details=f"Water accumulation defect #{hazard_id} registered ({result.water_area_percent:.1f}% coverage, Severity: {result.severity}). Risk: {result.risk_contribution}",
+        )
+        db.add(audit_entry)
+
+        # Recalculate road risk using Risk Engine
+        from backend.services.risk_engine import evaluate_road_risk
+        risk_eval = evaluate_road_risk(target_road.id, db)
+        target_road.risk_score = risk_eval["risk_score"]
+        target_road.safe_city_score = max(round(100.0 - target_road.risk_score, 1), 0.0)
+
+        db.commit()
+
+    regions_out = [
+        WaterRegionItemOut(
+            id=r.region_id,
+            area_pixels=r.area_pixels,
+            area_percent=r.area_percent,
+            confidence=r.confidence,
+            severity=r.severity,
+            box=WaterRegionBoxOut(x1=r.bounding_box[0], y1=r.bounding_box[1], x2=r.bounding_box[2], y2=r.bounding_box[3]),
+            polygon=r.polygon_points,
+            description=r.description,
+        )
+        for r in result.regions
+    ]
+
+    combined_out = None
+    if result.combined_hazard:
+        combined_out = CombinedHazardOut(
+            detected=True,
+            pothole_count=result.combined_hazard.get("pothole_count", 0),
+            pothole_severity=result.combined_hazard.get("pothole_severity", "NONE"),
+            water_severity=result.combined_hazard.get("water_severity", "NONE"),
+            combined_risk_score=result.combined_hazard.get("combined_risk_score", 0.0),
+            obscured_hazard_warning=result.combined_hazard.get("obscured_hazard_warning", ""),
+            interaction_factor=result.combined_hazard.get("interaction_factor", 1.2),
+        )
+
+    return WaterAnalysisOut(
+        success=True,
+        image_id=result.image_id,
+        hazard_type="water_accumulation",
+        detected=result.detected,
+        confidence=result.confidence,
+        severity=result.severity,
+        water_area_percent=result.water_area_percent,
+        road_area_pixels=result.road_area_pixels,
+        water_area_pixels=result.water_area_pixels,
+        regions=regions_out,
+        risk_contribution=result.risk_contribution,
+        processed_image_url=result.processed_image_url,
+        mask_image_url=result.mask_image_url,
+        is_demo_mode=result.is_demo_mode,
+        model_status=result.model_status,
+        depth_label=result.depth_label,
+        combined_hazard=combined_out,
+        hazard_id=hazard_id,
+        road_id=target_road.id if target_road else None,
+        road_name=target_road.name if target_road else "General Corridor",
+        latitude=assigned_lat,
+        longitude=assigned_lng,
+        timestamp=datetime.utcnow().isoformat(),
+    )
+

@@ -201,11 +201,18 @@ def evaluate_road_risk(road_id: int, db: Session) -> Dict[str, Any]:
     hazards = db.query(Hazard).filter(Hazard.road_id == road_id, Hazard.status == "active").all()
     conflicts = db.query(NearMiss).filter(NearMiss.road_id == road_id).all()
 
-    # 1. Hazard Severity Factor
+    # 1. Hazard Severity Factor (Pothole + Water Accumulation + Combined Interaction)
+    pothole_hazards = [h for h in hazards if h.type == "pothole"]
+    water_hazards = [h for h in hazards if h.type == "water_accumulation"]
+
     if hazards:
-        sev_map = {"CRITICAL": 1.0, "HIGH": 0.75, "MEDIUM": 0.50, "LOW": 0.25}
+        sev_map = {"CRITICAL": 1.0, "HIGH": 0.80, "MEDIUM": 0.55, "LOW": 0.30}
         highest_sev = max((h.severity or "MEDIUM").upper() for h in hazards)
         hazard_factor = sev_map.get(highest_sev, 0.50)
+
+        # Combined Hazard Interaction (Standing water obscuring sub-surface potholes)
+        if pothole_hazards and water_hazards:
+            hazard_factor = clamp(hazard_factor + 0.15, 0.0, 1.0)
     else:
         hazard_factor = 0.20
 
@@ -225,7 +232,7 @@ def evaluate_road_risk(road_id: int, db: Session) -> Dict[str, Any]:
     # 4. Near-Miss Risk Factor
     if conflicts:
         conflict_count = len(conflicts)
-        min_ttc = min((c.ttc_seconds or 2.0) for c in conflicts)
+        min_ttc = min((getattr(c, "ttc", None) or getattr(c, "ttc_seconds", 2.0) or 2.0) for c in conflicts)
         near_miss_factor = clamp(0.30 + (conflict_count * 0.10) + (1.5 / max(min_ttc, 0.5)) * 0.20, 0.0, 1.0)
     else:
         near_miss_factor = 0.30

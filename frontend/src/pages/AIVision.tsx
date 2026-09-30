@@ -6,13 +6,13 @@ import RiskBadge from '@/components/ui/RiskBadge'
 import StatusBadge from '@/components/ui/StatusBadge'
 import {
   useRoads, useJunctions, useAIModelStatus,
-  useAnalyzePothole, useAnalyzePotholeVideo, useAnalyzeTraffic, useAIEvents,
+  useAnalyzePothole, useAnalyzePotholeVideo, useAnalyzeWater, useAnalyzeTraffic, useAIEvents,
   useDemoTrafficVideo, useReviewConflict
 } from '@/hooks/useApi'
-import type { PotholeAnalysisResult, PotholeVideoAnalysisResult, UniquePotholeTrack, TrafficAnalysisResult, TrafficConflictDetail } from '@/types'
+import type { PotholeAnalysisResult, PotholeVideoAnalysisResult, UniquePotholeTrack, WaterAnalysisResult, TrafficAnalysisResult, TrafficConflictDetail } from '@/types'
 
 export default function AIVision() {
-  const [activeTab, setActiveTab] = useState<'potholes' | 'pothole-video' | 'traffic'>('potholes')
+  const [activeTab, setActiveTab] = useState<'potholes' | 'pothole-video' | 'water' | 'traffic'>('potholes')
 
   // API Hooks
   const { data: roads = [] } = useRoads()
@@ -21,6 +21,62 @@ export default function AIVision() {
   const { data: aiEvents = [] } = useAIEvents()
   const { data: demoVideoMeta } = useDemoTrafficVideo()
   const { mutate: reviewConflict, isPending: isReviewingConflict } = useReviewConflict()
+
+  // ── Water Accumulation State ──────────────────────────────────────────────
+  const [waterFile, setWaterFile] = useState<File | null>(null)
+  const [waterPreview, setWaterPreview] = useState<string | null>(null)
+  const [selectedWaterRoadId, setSelectedWaterRoadId] = useState<number | undefined>(undefined)
+  const [waterHasPotholes, setWaterHasPotholes] = useState<boolean>(false)
+  const [waterPotholeSeverity, setWaterPotholeSeverity] = useState<string>('HIGH')
+  const [waterPotholeCount, setWaterPotholeCount] = useState<number>(1)
+  const [waterResult, setWaterResult] = useState<WaterAnalysisResult | null>(null)
+  const [waterError, setWaterError] = useState<string | null>(null)
+  const [isDraggingWater, setIsDraggingWater] = useState<boolean>(false)
+  const [waterViewMode, setWaterViewMode] = useState<'side-by-side' | 'single'>('side-by-side')
+  const [waterSingleToggle, setWaterSingleToggle] = useState<'processed' | 'mask' | 'original'>('processed')
+
+  const waterInputRef = useRef<HTMLInputElement>(null)
+  const { mutate: runWaterAnalysis, isPending: isAnalyzingWater } = useAnalyzeWater()
+
+  const processWaterFile = (file: File, autoRun = true) => {
+    setWaterError(null)
+    if (!file.type.startsWith('image/') && !file.name.match(/\.(jpg|jpeg|png|webp)$/i)) {
+      setWaterError('Please upload a valid image file (JPG, PNG, WEBP).')
+      return
+    }
+    if (file.size > 15 * 1024 * 1024) {
+      setWaterError('File size exceeds 15MB limit.')
+      return
+    }
+
+    setWaterFile(file)
+    setWaterPreview(URL.createObjectURL(file))
+    setWaterResult(null)
+
+    if (autoRun) {
+      runWaterAnalysis(
+        {
+          file,
+          road_id: selectedWaterRoadId,
+          has_potholes: waterHasPotholes,
+          pothole_severity: waterPotholeSeverity,
+          pothole_count: waterPotholeCount,
+        },
+        {
+          onSuccess: (data) => setWaterResult(data),
+          onError: (err: any) => setWaterError(err.response?.data?.detail || err.message || 'Water analysis failed.'),
+        }
+      )
+    }
+  }
+
+  const handleWaterDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDraggingWater(false)
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      processWaterFile(e.dataTransfer.files[0])
+    }
+  }
 
   // ── Pothole Upload & Camera State ──────────────────────────────────────────
   const [potholeFile, setPotholeFile] = useState<File | null>(null)
@@ -480,6 +536,18 @@ export default function AIVision() {
           <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-navy-800 border border-gray-800 text-xs">
             <span
               className={`w-2 h-2 rounded-full ${
+                modelStatus?.water_model_loaded ? 'bg-emerald-400 animate-pulse' : 'bg-cyan-400 animate-pulse'
+              }`}
+            />
+            <span className="text-gray-400">Water AI:</span>
+            <span className="text-white font-mono font-bold text-[11px]">
+              {modelStatus?.water_model_loaded ? 'YOLOv8-Seg Active' : 'Optical Segmenter'}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-navy-800 border border-gray-800 text-xs">
+            <span
+              className={`w-2 h-2 rounded-full ${
                 modelStatus?.traffic_model_loaded ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'
               }`}
             />
@@ -512,6 +580,16 @@ export default function AIVision() {
           }`}
         >
           🎥 Road Video Analysis (Potholes)
+        </button>
+        <button
+          onClick={() => setActiveTab('water')}
+          className={`pb-3 px-4 text-sm font-semibold transition-all relative flex-shrink-0 ${
+            activeTab === 'water'
+              ? 'text-white border-b-2 border-cyan-400 text-cyan-300'
+              : 'text-gray-500 hover:text-gray-300'
+          }`}
+        >
+          💧 Water Accumulation Analysis
         </button>
         <button
           onClick={() => setActiveTab('traffic')}
@@ -1432,7 +1510,450 @@ export default function AIVision() {
       )}
 
       {/* ────────────────────────────────────────────────────────────────────────
-          TAB 3: TRAFFIC VIDEO ANALYSIS (YOLOv8 + ByteTrack)
+          TAB 3: WATER ACCUMULATION ANALYSIS
+         ──────────────────────────────────────────────────────────────────────── */}
+      {activeTab === 'water' && (
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+          {/* Left Column: Upload & Options */}
+          <div className="xl:col-span-1 space-y-4">
+            <div className="card">
+              <div className="card-header flex items-center justify-between">
+                <span>Water Accumulation Image Upload</span>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-900/50 text-cyan-300 border border-cyan-700/50 font-mono">
+                  Segmentation
+                </span>
+              </div>
+
+              {/* Drag & Drop Area */}
+              <div
+                onClick={() => waterInputRef.current?.click()}
+                onDragOver={(e) => { e.preventDefault(); setIsDraggingWater(true); }}
+                onDragLeave={() => setIsDraggingWater(false)}
+                onDrop={handleWaterDrop}
+                className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all ${
+                  isDraggingWater
+                    ? 'border-cyan-400 bg-cyan-950/20'
+                    : 'border-gray-700 hover:border-gray-500 bg-navy-900/50'
+                }`}
+              >
+                <input
+                  ref={waterInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  className="hidden"
+                  onChange={(e) => e.target.files?.[0] && processWaterFile(e.target.files[0])}
+                />
+                <div className="text-4xl mb-2">💧</div>
+                <div className="text-sm font-semibold text-gray-200">
+                  {waterFile ? waterFile.name : 'Drop Road Image Here or Click to Upload'}
+                </div>
+                <div className="text-xs text-gray-500 mt-1">
+                  Supports JPG, PNG, WEBP (Max 15MB)
+                </div>
+              </div>
+
+              {/* Road Selection & Combined Hazard Options */}
+              <div className="mt-4 space-y-3">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Target Monitored Road</label>
+                  <select
+                    value={selectedWaterRoadId || ''}
+                    onChange={(e) => setSelectedWaterRoadId(e.target.value ? Number(e.target.value) : undefined)}
+                    className="w-full bg-navy-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white"
+                  >
+                    <option value="">Auto-Detect Road (General Corridor)</option>
+                    {roads.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name} ({r.road_type})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="p-3 rounded-lg bg-navy-900/80 border border-gray-800 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-gray-300 flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={waterHasPotholes}
+                        onChange={(e) => setWaterHasPotholes(e.target.checked)}
+                        className="rounded border-gray-700 bg-navy-950 text-cyan-500 focus:ring-0"
+                      />
+                      Combined Hazard (Pothole Present)
+                    </label>
+                    {waterHasPotholes && (
+                      <span className="text-[10px] font-bold text-amber-400 bg-amber-950/60 border border-amber-700/50 px-1.5 py-0.5 rounded">
+                        Obscured Defect Boost
+                      </span>
+                    )}
+                  </div>
+
+                  {waterHasPotholes && (
+                    <div className="grid grid-cols-2 gap-2 pt-1">
+                      <div>
+                        <label className="block text-[11px] text-gray-400 mb-1">Pothole Severity</label>
+                        <select
+                          value={waterPotholeSeverity}
+                          onChange={(e) => setWaterPotholeSeverity(e.target.value)}
+                          className="w-full bg-navy-950 border border-gray-700 rounded px-2 py-1 text-xs text-white"
+                        >
+                          <option value="LOW">LOW</option>
+                          <option value="MEDIUM">MEDIUM</option>
+                          <option value="HIGH">HIGH</option>
+                          <option value="CRITICAL">CRITICAL</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-gray-400 mb-1">Defect Count</label>
+                        <input
+                          type="number"
+                          min="1"
+                          max="10"
+                          value={waterPotholeCount}
+                          onChange={(e) => setWaterPotholeCount(Number(e.target.value))}
+                          className="w-full bg-navy-950 border border-gray-700 rounded px-2 py-1 text-xs text-white"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {waterError && (
+                  <div className="p-3 rounded-lg bg-red-950/50 border border-red-700 text-xs text-red-300">
+                    ⚠️ {waterError}
+                  </div>
+                )}
+
+                <button
+                  disabled={!waterFile || isAnalyzingWater}
+                  onClick={() => waterFile && processWaterFile(waterFile, true)}
+                  className="w-full py-2.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white font-semibold text-xs transition-all shadow-lg flex items-center justify-center gap-2"
+                >
+                  {isAnalyzingWater ? (
+                    <>
+                      <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      Analyzing Standing Water...
+                    </>
+                  ) : (
+                    '💧 Analyze Water Accumulation'
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Developer Model Status Panel */}
+            <div className="card bg-navy-900/60 border-cyan-900/40">
+              <div className="card-header flex items-center justify-between text-xs">
+                <span>Developer Model Status</span>
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
+                  modelStatus?.water_model_loaded
+                    ? 'bg-emerald-950 text-emerald-300 border-emerald-700'
+                    : 'bg-amber-950 text-amber-300 border-amber-700'
+                }`}>
+                  {modelStatus?.water_model_loaded ? 'YOLOv8-SEG LOADED' : 'UNCONFIGURED (FALLBACK MODE)'}
+                </span>
+              </div>
+              <div className="space-y-2 text-xs text-gray-300">
+                <div className="flex justify-between py-1 border-b border-gray-800">
+                  <span className="text-gray-400">Model Path:</span>
+                  <span className="font-mono text-cyan-300">{modelStatus?.water_model_path || 'models/water_segmentation.pt'}</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-gray-800">
+                  <span className="text-gray-400">Segmentation Model:</span>
+                  <span className="font-mono">{modelStatus?.water_model_loaded ? 'Active (Local PyTorch/Ultralytics)' : 'Optical Water-Region Segmenter'}</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-gray-800">
+                  <span className="text-gray-400">Inference Mode:</span>
+                  <span className="font-mono">{modelStatus?.water_model_loaded ? 'REAL MODEL INFERENCE' : 'PROTOTYPE SCANNER'}</span>
+                </div>
+                <p className="text-[11px] text-gray-400 leading-relaxed pt-1">
+                  ℹ️ Place your custom trained YOLOv8 segmentation weights at <code className="text-cyan-300">models/water_segmentation.pt</code> to enable local neural instance segmentation.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Right Column: Results Display */}
+          <div className="xl:col-span-2 space-y-4">
+            {waterResult ? (
+              <>
+                {/* Result Header & Status Banner */}
+                <div className="card space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-800 pb-3">
+                    <div>
+                      <h3 className="text-base font-bold text-white flex items-center gap-2">
+                        💧 Water Accumulation Analysis Results
+                        <span className={`text-xs px-2.5 py-0.5 rounded font-bold ${
+                          waterResult.detected
+                            ? waterResult.severity === 'CRITICAL' ? 'bg-red-950 text-red-300 border border-red-700'
+                              : waterResult.severity === 'HIGH' ? 'bg-orange-950 text-orange-300 border border-orange-700'
+                              : 'bg-amber-950 text-amber-300 border border-amber-700'
+                            : 'bg-emerald-950 text-emerald-300 border border-emerald-700'
+                        }`}>
+                          {waterResult.detected ? `DETECTED (${waterResult.severity})` : 'NO WATER DETECTED'}
+                        </span>
+                      </h3>
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        Road: <span className="text-gray-200 font-semibold">{waterResult.road_name}</span> | ID: <span className="font-mono text-cyan-400">{waterResult.image_id}</span>
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setWaterViewMode(waterViewMode === 'side-by-side' ? 'single' : 'side-by-side')}
+                        className="px-3 py-1.5 text-xs bg-navy-800 hover:bg-navy-700 text-gray-200 rounded border border-gray-700 transition-all"
+                      >
+                        {waterViewMode === 'side-by-side' ? '🔍 Single View' : '↔️ Side-by-Side'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Mode & Provenance Banner */}
+                  <div className={`px-3 py-2 rounded text-xs border flex items-center justify-between ${
+                    waterResult.is_demo_mode
+                      ? 'bg-amber-950/30 border-amber-700/50 text-amber-300'
+                      : 'bg-cyan-950/30 border-cyan-700/50 text-cyan-300'
+                  }`}>
+                    <span>
+                      {waterResult.is_demo_mode ? '⚠️ PROTOTYPE SCANNER (Uncalibrated Optical Water Segmenter)' : '🟢 REAL MODEL INFERENCE (YOLOv8-SEG)'}
+                    </span>
+                    <span className="font-mono font-bold text-[11px]">
+                      {waterResult.model_status}
+                    </span>
+                  </div>
+
+                  {/* Key Metrics Grid */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div className="p-3 rounded-lg bg-navy-900 border border-gray-800">
+                      <div className="text-[11px] text-gray-400">Affected Road Area</div>
+                      <div className="text-xl font-bold text-cyan-400 font-mono mt-0.5">
+                        {waterResult.water_area_percent}%
+                      </div>
+                      <div className="text-[10px] text-gray-500 mt-0.5">
+                        Road-bounded coverage
+                      </div>
+                    </div>
+
+                    <div className="p-3 rounded-lg bg-navy-900 border border-gray-800">
+                      <div className="text-[11px] text-gray-400">Detection Confidence</div>
+                      <div className="text-xl font-bold text-white font-mono mt-0.5">
+                        {Math.round(waterResult.confidence * 100)}%
+                      </div>
+                      <div className="text-[10px] text-gray-500 mt-0.5">
+                        AI Pattern Match
+                      </div>
+                    </div>
+
+                    <div className="p-3 rounded-lg bg-navy-900 border border-gray-800">
+                      <div className="text-[11px] text-gray-400">Severity Tier</div>
+                      <div className={`text-xl font-bold font-mono mt-0.5 ${
+                        waterResult.severity === 'CRITICAL' ? 'text-red-400'
+                        : waterResult.severity === 'HIGH' ? 'text-orange-400'
+                        : waterResult.severity === 'MEDIUM' ? 'text-amber-400'
+                        : 'text-emerald-400'
+                      }`}>
+                        {waterResult.severity}
+                      </div>
+                      <div className="text-[10px] text-gray-500 mt-0.5">
+                        {waterResult.regions.length} Water Region(s)
+                      </div>
+                    </div>
+
+                    <div className="p-3 rounded-lg bg-navy-900 border border-gray-800">
+                      <div className="text-[11px] text-gray-400">Risk Contribution</div>
+                      <div className="text-xl font-bold text-red-400 font-mono mt-0.5">
+                        +{waterResult.risk_contribution} pts
+                      </div>
+                      <div className="text-[10px] text-gray-500 mt-0.5">
+                        Added to Road Risk
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Depth Disclaimer Banner */}
+                  <div className="px-3 py-2 rounded bg-navy-950 border border-gray-800 text-xs flex items-center justify-between text-gray-400">
+                    <span className="flex items-center gap-1.5">
+                      ℹ️ <strong>Water Depth:</strong> {waterResult.depth_label}
+                    </span>
+                    <span className="text-[11px] text-gray-500">
+                      RGB Monocular Camera
+                    </span>
+                  </div>
+
+                  {/* Visual Overlay Image Display */}
+                  {waterViewMode === 'side-by-side' ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                      <div className="space-y-1.5">
+                        <div className="text-xs font-semibold text-gray-300 flex items-center justify-between">
+                          <span>Original Road Upload</span>
+                        </div>
+                        <div className="rounded-lg overflow-hidden border border-gray-800 bg-black aspect-video flex items-center justify-center">
+                          <img
+                            src={waterPreview || waterResult.processed_image_url}
+                            alt="Original Road"
+                            className="w-full h-full object-contain"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <div className="text-xs font-semibold text-cyan-300 flex items-center justify-between">
+                          <span>Water Mask Visual Overlay</span>
+                          <span className="text-[10px] text-cyan-400 font-mono">Cyan Highlight</span>
+                        </div>
+                        <div className="rounded-lg overflow-hidden border border-cyan-800/50 bg-black aspect-video flex items-center justify-center">
+                          <img
+                            src={waterResult.processed_image_url}
+                            alt="Water Mask Overlay"
+                            className="w-full h-full object-contain"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-2 pt-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => setWaterSingleToggle('processed')}
+                            className={`px-3 py-1 rounded text-xs font-semibold ${
+                              waterSingleToggle === 'processed' ? 'bg-cyan-600 text-white' : 'bg-navy-800 text-gray-400'
+                            }`}
+                          >
+                            Visual Mask Overlay
+                          </button>
+                          <button
+                            onClick={() => setWaterSingleToggle('mask')}
+                            className={`px-3 py-1 rounded text-xs font-semibold ${
+                              waterSingleToggle === 'mask' ? 'bg-cyan-600 text-white' : 'bg-navy-800 text-gray-400'
+                            }`}
+                          >
+                            Binary Mask Only
+                          </button>
+                          <button
+                            onClick={() => setWaterSingleToggle('original')}
+                            className={`px-3 py-1 rounded text-xs font-semibold ${
+                              waterSingleToggle === 'original' ? 'bg-cyan-600 text-white' : 'bg-navy-800 text-gray-400'
+                            }`}
+                          >
+                            Original
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl overflow-hidden border border-gray-800 bg-black aspect-video max-h-[480px] flex items-center justify-center">
+                        <img
+                          src={
+                            waterSingleToggle === 'mask'
+                              ? waterResult.mask_image_url
+                              : waterSingleToggle === 'original'
+                              ? waterPreview || waterResult.processed_image_url
+                              : waterResult.processed_image_url
+                          }
+                          alt="Water Detection"
+                          className="w-full h-full object-contain"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Combined Road Hazard Card */}
+                {waterResult.combined_hazard && (
+                  <div className="card bg-amber-950/20 border-amber-700/40 p-4 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-sm font-bold text-amber-300 flex items-center gap-2">
+                        ⚠️ COMBINED ROAD HAZARD (Standing Water + Potholes)
+                      </h4>
+                      <span className="text-xs font-mono font-bold text-red-400 bg-red-950 px-2 py-0.5 rounded border border-red-700">
+                        Combined Risk: {waterResult.combined_hazard.combined_risk_score}/100
+                      </span>
+                    </div>
+                    <p className="text-xs text-amber-200/90 leading-relaxed">
+                      {waterResult.combined_hazard.obscured_hazard_warning}
+                    </p>
+                    <div className="grid grid-cols-3 gap-2 text-xs pt-1">
+                      <div className="p-2 rounded bg-navy-950/80 border border-gray-800">
+                        <span className="text-gray-400 block text-[10px]">Pothole Severity:</span>
+                        <span className="font-bold text-amber-300">{waterResult.combined_hazard.pothole_severity} ({waterResult.combined_hazard.pothole_count} defect(s))</span>
+                      </div>
+                      <div className="p-2 rounded bg-navy-950/80 border border-gray-800">
+                        <span className="text-gray-400 block text-[10px]">Water Severity:</span>
+                        <span className="font-bold text-cyan-300">{waterResult.combined_hazard.water_severity}</span>
+                      </div>
+                      <div className="p-2 rounded bg-navy-950/80 border border-gray-800">
+                        <span className="text-gray-400 block text-[10px]">Obscuration Factor:</span>
+                        <span className="font-bold text-red-300">{waterResult.combined_hazard.interaction_factor}x Risk Boost</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Multi-Region Water Puddle Table */}
+                {waterResult.regions.length > 0 && (
+                  <div className="card space-y-3">
+                    <div className="card-header text-xs flex items-center justify-between">
+                      <span>Detected Water Regions (Multi-Puddle Segmentation)</span>
+                      <span className="text-gray-400 font-mono text-[11px]">{waterResult.regions.length} Regions</span>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs text-left">
+                        <thead>
+                          <tr className="border-b border-gray-800 text-gray-400 bg-navy-900/60">
+                            <th className="p-2.5">Region</th>
+                            <th className="p-2.5">Area (Pixels)</th>
+                            <th className="p-2.5">Road Surface Coverage</th>
+                            <th className="p-2.5">Severity</th>
+                            <th className="p-2.5">Confidence</th>
+                            <th className="p-2.5">Bounding Box (x1, y1, x2, y2)</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-800">
+                          {waterResult.regions.map((reg) => (
+                            <tr key={reg.id} className="hover:bg-navy-900/40 font-mono">
+                              <td className="p-2.5 font-bold text-cyan-300">Puddle #{reg.id}</td>
+                              <td className="p-2.5 text-gray-300">{reg.area_pixels} px</td>
+                              <td className="p-2.5 font-bold text-white">{reg.area_percent}%</td>
+                              <td className="p-2.5">
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  reg.severity === 'CRITICAL' ? 'bg-red-950 text-red-300 border border-red-800'
+                                  : reg.severity === 'HIGH' ? 'bg-orange-950 text-orange-300 border border-orange-800'
+                                  : reg.severity === 'MEDIUM' ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                                  : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                                }`}>
+                                  {reg.severity}
+                                </span>
+                              </td>
+                              <td className="p-2.5 text-gray-300">{Math.round(reg.confidence * 100)}%</td>
+                              <td className="p-2.5 text-gray-400 text-[11px]">
+                                ({reg.box.x1}, {reg.box.y1}) to ({reg.box.x2}, {reg.box.y2})
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="card h-full min-h-[420px] flex flex-col items-center justify-center p-8 text-center border-dashed border-gray-800">
+                <div className="text-5xl mb-3 opacity-40">💧</div>
+                <h3 className="text-base font-bold text-gray-300 mb-1">
+                  Water Accumulation / Waterlogging Pipeline Ready
+                </h3>
+                <p className="text-xs text-gray-500 max-w-md leading-relaxed">
+                  Upload a road image on the left to execute standing water segmentation, calculate road-bounded coverage percentages, evaluate visual severity, and render cyan mask overlays.
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ────────────────────────────────────────────────────────────────────────
+          TAB 4: TRAFFIC VIDEO ANALYSIS (YOLOv8 + ByteTrack)
          ──────────────────────────────────────────────────────────────────────── */}
       {activeTab === 'traffic' && (
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">

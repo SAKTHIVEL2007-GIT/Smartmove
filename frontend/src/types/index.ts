@@ -431,11 +431,70 @@ export interface AIModelStatus {
   pothole_model_loaded: boolean
   traffic_model_path: string
   traffic_model_loaded: boolean
+  water_model_path?: string
+  water_model_loaded?: boolean
   is_pothole_demo_mode: boolean
   is_traffic_demo_mode: boolean
+  is_water_demo_mode?: boolean
   message: string
   device?: string
   engine?: string
+}
+
+// ── Water Accumulation Analysis Interfaces ───────────────────────────────────
+
+export interface WaterRegionBox {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+}
+
+export interface WaterRegionItem {
+  id: number
+  area_pixels: number
+  area_percent: number
+  confidence: number
+  severity: string
+  box: WaterRegionBox
+  polygon?: number[][]
+  description?: string
+}
+
+export interface CombinedHazard {
+  detected: boolean
+  pothole_count: number
+  pothole_severity: string
+  water_severity: string
+  combined_risk_score: number
+  obscured_hazard_warning: string
+  interaction_factor: number
+}
+
+export interface WaterAnalysisResult {
+  success: boolean
+  image_id: string
+  hazard_type: string
+  detected: boolean
+  confidence: number
+  severity: string
+  water_area_percent: number
+  road_area_pixels?: number
+  water_area_pixels?: number
+  regions: WaterRegionItem[]
+  risk_contribution: number
+  processed_image_url: string
+  mask_image_url: string
+  is_demo_mode: boolean
+  model_status: string
+  depth_label: string
+  combined_hazard?: CombinedHazard | null
+  hazard_id?: number | null
+  road_id?: number | null
+  road_name?: string | null
+  latitude?: number | null
+  longitude?: number | null
+  timestamp?: string
 }
 
 // ── Road Safety Intelligence Layer Types ─────────────────────────────────────
