@@ -421,6 +421,78 @@ class PotholeAnalysisOut(BaseModel):
     disclaimer: Optional[str] = "AI detection confidence measures visual pattern recognition accuracy only; it does not represent collision probability. NO DATA ≠ SAFE ROAD."
 
 
+class UniquePotholeTrackOut(BaseModel):
+    pothole_id: int
+    first_seen_timestamp: str
+    last_seen_timestamp: str
+    first_seen_seconds: float
+    last_seen_seconds: float
+    first_seen_frame: int
+    last_seen_frame: int
+    max_confidence: float
+    average_confidence: float
+    severity: str
+    risk_score: float
+    box: PotholeDetectionBoundingBoxOut
+    snapshot_url: str
+    frame_count: int
+
+
+class PotholeVideoTimelineItemOut(BaseModel):
+    pothole_id: int
+    timestamp_str: str
+    timestamp_seconds: float
+    frame_index: int
+    confidence: float
+    severity: str
+    snapshot_url: str
+
+
+class VideoMetaOut(BaseModel):
+    filename: str
+    duration_seconds: float
+    fps: float
+    width: int
+    height: int
+    total_frames: int
+
+
+class PotholeVideoAnalysisSummaryOut(BaseModel):
+    frames_analyzed: int
+    process_every_n_frames: int
+    confidence_threshold: float
+    unique_potholes: int
+    total_detections: int
+    max_confidence: float
+    average_confidence: float
+    high_severity_count: int = 0
+    medium_severity_count: int = 0
+    low_severity_count: int = 0
+
+
+class PotholeVideoAnalysisOut(BaseModel):
+    success: bool = True
+    video_id: str
+    is_demo_mode: bool
+    model_status: str
+    status_message: str
+    model_path: str
+    video: VideoMetaOut
+    analysis: PotholeVideoAnalysisSummaryOut
+    unique_potholes: List[UniquePotholeTrackOut]
+    timeline: List[PotholeVideoTimelineItemOut]
+    original_video_url: str
+    processed_video_url: str
+    road_id: Optional[int] = None
+    road_name: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    gps_source: Optional[str] = "GPS unavailable in uploaded video"
+    created_hazard_ids: List[int] = []
+    timestamp: Optional[str] = None
+    disclaimer: Optional[str] = "AI pothole detection confidence measures visual pattern recognition accuracy only. Deduplication performed via spatial-temporal tracking."
+
+
 class TrafficConflictDetailOut(BaseModel):
     conflict_id: str
     timestamp_str: str

@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import type {
   DashboardData, Road, Hazard, Junction, Intervention, CitizenReport, CitizenReportCreate,
-  PotholeAnalysisResult, TrafficAnalysisResult, AIModelStatus, AIEvent,
+  PotholeAnalysisResult, PotholeVideoAnalysisResult, TrafficAnalysisResult, AIModelStatus, AIEvent,
   RoadSafetyEvaluation, PrioritizedRepairItem, MunicipalRepairStatus,
   RouteComparisonResult, SmartJunctionDisplayState,
   RoadSegmentDossier, EvidenceFile, AuditLog, NearMiss, DecisionAuditRecord,
@@ -200,6 +200,44 @@ export function useAnalyzePothole() {
       const response = await api.post('/api/potholes/analyze', formData, {
         headers: { 'Content-Type': undefined },
         timeout: 120_000,
+      })
+      return response.data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryKeyRefetch(queryClient, 'hazards')
+      queryKeyRefetch(queryClient, 'roads')
+      queryKeyRefetch(queryClient, 'ai-events')
+      queryKeyRefetch(queryClient, 'danger-zones')
+      queryKeyRefetch(queryClient, 'road-intelligence')
+      queryKeyRefetch(queryClient, 'evidence')
+      queryKeyRefetch(queryClient, 'audit-logs')
+    },
+  })
+}
+
+export function useAnalyzePotholeVideo() {
+  const queryClient = useQueryClient()
+  return useMutation<PotholeVideoAnalysisResult, Error, {
+    file: File
+    road_id?: number
+    process_every_n_frames?: number
+    conf_threshold?: number
+    min_confirmation_frames?: number
+  }>({
+    mutationFn: async ({ file, road_id, process_every_n_frames = 2, conf_threshold = 0.40, min_confirmation_frames = 3 }) => {
+      const formData = new FormData()
+      formData.append('file', file)
+      if (road_id !== undefined && road_id !== null) {
+        formData.append('road_id', road_id.toString())
+      }
+      formData.append('process_every_n_frames', process_every_n_frames.toString())
+      formData.append('conf_threshold', conf_threshold.toString())
+      formData.append('min_confirmation_frames', min_confirmation_frames.toString())
+
+      const response = await api.post('/api/potholes/analyze-video', formData, {
+        headers: { 'Content-Type': undefined },
+        timeout: 300_000,
       })
       return response.data
     },

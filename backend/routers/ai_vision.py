@@ -16,7 +16,8 @@ from backend.database import get_db
 from backend.models import Road, Hazard, NearMiss, Junction
 from backend.schemas import (
     PotholeAnalysisOut, TrafficAnalysisOut, AIEvent, AIModelStatusOut,
-    PotholeDetectionItemOut, BoundingBoxOut, TrafficConflictDetailOut
+    PotholeDetectionItemOut, BoundingBoxOut, TrafficConflictDetailOut,
+    PotholeVideoAnalysisOut, UniquePotholeTrackOut, PotholeVideoTimelineItemOut
 )
 from backend.services.pothole_detection import PotholeDetectionService
 from backend.services.traffic_analysis import TrafficAnalysisService
@@ -232,6 +233,165 @@ async def analyze_pothole_image(
         timestamp=result.timestamp,
         disclaimer=result.disclaimer,
     )
+
+
+@router.post("/potholes/analyze-video", response_model=PotholeVideoAnalysisOut)
+@router.post("/analyze/video/potholes", response_model=PotholeVideoAnalysisOut)
+async def analyze_pothole_video(
+    file: UploadFile = File(...),
+    road_id: Optional[int] = Form(None),
+    process_every_n_frames: Optional[int] = Form(2),
+    conf_threshold: Optional[float] = Form(0.40),
+    min_confirmation_frames: Optional[int] = Form(3),
+    db: Session = Depends(get_db),
+):
+    """
+    Upload road video (MP4/MOV/AVI/MKV/WEBM) ->
+    Frame-by-frame YOLOv8 pothole detection -> Spatial-temporal IoU tracking ->
+    Unique pothole deduplication -> Annotated MP4 rendering + Keyframe snapshots ->
+    Persist Hazard & Evidence records to DB -> Return complete analysis result.
+    """
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    allowed = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+    if ext not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported video extension '{ext}'. Allowed formats: MP4, MOV, AVI, MKV, WEBM.",
+        )
+
+    video_bytes = await file.read()
+    if len(video_bytes) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded video file is empty (0 bytes).",
+        )
+    if len(video_bytes) > 100 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Video file exceeds maximum allowable size of 100MB ({len(video_bytes)/(1024*1024):.1f}MB).",
+        )
+
+    # Resolve target road if specified
+    target_road = None
+    if road_id:
+        target_road = db.query(Road).filter(Road.id == road_id).first()
+    if not target_road:
+        target_road = db.query(Road).first()
+
+    road_name = target_road.name if target_road else "General Corridor"
+    road_type = target_road.road_type if target_road else "urban_arterial"
+    traffic_exp = target_road.traffic_exposure if target_road else "HIGH"
+
+    try:
+        raw_res = pothole_service.analyze_video(
+            video_bytes=video_bytes,
+            filename=file.filename or "pothole_video.mp4",
+            road_id=target_road.id if target_road else None,
+            road_type=road_type,
+            traffic_exposure=traffic_exp,
+            process_every_n_frames=process_every_n_frames or 2,
+            conf_threshold=conf_threshold or 0.40,
+            min_confirmation_frames=min_confirmation_frames or 3,
+        )
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Failed to process video with pothole vision pipeline: {str(e)}",
+        )
+
+    # Persist VideoAnalysis session & Hazard DB records
+    created_hazard_ids: List[int] = []
+    try:
+        from backend.models import VideoAnalysis, AuditLog, EvidenceFile
+        v_analysis = VideoAnalysis(
+            video_id=raw_res["video_id"],
+            filename=file.filename or "pothole_video.mp4",
+            road_id=target_road.id if target_road else None,
+            frame_count=raw_res["video"]["total_frames"],
+            processed_frames=raw_res["analysis"]["frames_analyzed"],
+            object_count=raw_res["analysis"]["unique_potholes"],
+            conflict_count=0,
+            processing_time_sec=0.0,
+            video_url=raw_res["original_video_url"],
+            processed_video_url=raw_res["processed_video_url"],
+            summary_json={
+                "type": "pothole_video_analysis",
+                "unique_potholes": raw_res["analysis"]["unique_potholes"],
+                "total_detections": raw_res["analysis"]["total_detections"],
+                "status": raw_res["status_message"],
+            },
+        )
+        db.add(v_analysis)
+
+        # Register each unique confirmed pothole as a Hazard
+        if target_road:
+            assigned_lat = target_road.latitude
+            assigned_lng = target_road.longitude
+
+            for trk in raw_res["unique_potholes"]:
+                ev_code = f"SC-HV-{int(datetime.utcnow().timestamp()) % 9000 + 1000}-{trk['pothole_id']}"
+                hz = Hazard(
+                    road_id=target_road.id,
+                    type="pothole",
+                    severity=trk["severity"],
+                    visual_severity=trk["severity"],
+                    contextual_severity=trk["severity"],
+                    confidence=trk["max_confidence"],
+                    risk_score=trk["risk_score"],
+                    latitude=assigned_lat + random.uniform(-0.0003, 0.0003),
+                    longitude=assigned_lng + random.uniform(-0.0003, 0.0003),
+                    detected_at=datetime.utcnow(),
+                    status="active",
+                    evidence_id=ev_code,
+                    evidence_code=ev_code,
+                    source="YOLOv8 Pothole Video Pipeline",
+                    direction="Monitored Lane",
+                )
+                db.add(hz)
+                db.flush()
+                created_hazard_ids.append(hz.id)
+
+                if trk.get("snapshot_url"):
+                    db.add(EvidenceFile(
+                        evidence_code=ev_code,
+                        road_id=target_road.id,
+                        hazard_id=hz.id,
+                        file_type="KEYFRAME",
+                        file_url=trk["snapshot_url"],
+                        thumbnail_url=trk["snapshot_url"],
+                        captured_at=datetime.utcnow(),
+                        metadata_json={
+                            "pothole_id": trk["pothole_id"],
+                            "max_confidence": trk["max_confidence"],
+                            "severity": trk["severity"],
+                            "first_seen": trk["first_seen_timestamp"],
+                            "last_seen": trk["last_seen_timestamp"],
+                        },
+                        verified=False,
+                        notes=f"Video Pothole #{trk['pothole_id']} detected on {target_road.name} at timestamp {trk['first_seen_timestamp']}.",
+                    ))
+
+            # Audit Trail
+            db.add(AuditLog(
+                actor="AI_POTHOLE_VIDEO_PIPELINE",
+                action="POTHOLE_VIDEO_PROCESSED",
+                target_type="RoadSegment",
+                target_id=target_road.id,
+                details=f"Processed video '{file.filename}'. Found {raw_res['analysis']['unique_potholes']} unique pothole(s) across {raw_res['video']['total_frames']} frames.",
+            ))
+
+            db.commit()
+    except Exception as ex:
+        print(f"[AI Vision] Error persisting video pothole DB records: {ex}")
+
+    raw_res["road_name"] = road_name
+    raw_res["created_hazard_ids"] = created_hazard_ids
+    return raw_res
 
 
 @router.post("/traffic/analyze", response_model=TrafficAnalysisOut)

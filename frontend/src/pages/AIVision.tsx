@@ -6,13 +6,13 @@ import RiskBadge from '@/components/ui/RiskBadge'
 import StatusBadge from '@/components/ui/StatusBadge'
 import {
   useRoads, useJunctions, useAIModelStatus,
-  useAnalyzePothole, useAnalyzeTraffic, useAIEvents,
+  useAnalyzePothole, useAnalyzePotholeVideo, useAnalyzeTraffic, useAIEvents,
   useDemoTrafficVideo, useReviewConflict
 } from '@/hooks/useApi'
-import type { PotholeAnalysisResult, TrafficAnalysisResult, TrafficConflictDetail } from '@/types'
+import type { PotholeAnalysisResult, PotholeVideoAnalysisResult, UniquePotholeTrack, TrafficAnalysisResult, TrafficConflictDetail } from '@/types'
 
 export default function AIVision() {
-  const [activeTab, setActiveTab] = useState<'potholes' | 'traffic'>('potholes')
+  const [activeTab, setActiveTab] = useState<'potholes' | 'pothole-video' | 'traffic'>('potholes')
 
   // API Hooks
   const { data: roads = [] } = useRoads()
@@ -40,6 +40,22 @@ export default function AIVision() {
 
   const potholeInputRef = useRef<HTMLInputElement>(null)
   const { mutate: runPotholeAnalysis, isPending: isAnalyzingPothole } = useAnalyzePothole()
+
+  // ── Pothole Video State ───────────────────────────────────────────────────
+  const [potholeVideoFile, setPotholeVideoFile] = useState<File | null>(null)
+  const [potholeVideoPreview, setPotholeVideoPreview] = useState<string | null>(null)
+  const [potholeVideoMeta, setPotholeVideoMeta] = useState<{ fps: number; duration: number; width: number; height: number; totalFrames: number } | null>(null)
+  const [selectedPotholeVideoRoadId, setSelectedPotholeVideoRoadId] = useState<number | undefined>(undefined)
+  const [potholeVideoProcessEveryN, setPotholeVideoProcessEveryN] = useState<number>(2)
+  const [potholeVideoConfThreshold, setPotholeVideoConfThreshold] = useState<number>(0.40)
+  const [potholeVideoMinFrames, setPotholeVideoMinFrames] = useState<number>(3)
+  const [potholeVideoResult, setPotholeVideoResult] = useState<PotholeVideoAnalysisResult | null>(null)
+  const [potholeVideoError, setPotholeVideoError] = useState<string | null>(null)
+  const [isDraggingPotholeVideo, setIsDraggingPotholeVideo] = useState<boolean>(false)
+
+  const potholeVideoInputRef = useRef<HTMLInputElement>(null)
+  const annotatedPotholeVideoRef = useRef<HTMLVideoElement>(null)
+  const { mutate: runPotholeVideoAnalysis, isPending: isAnalyzingPotholeVideo } = useAnalyzePotholeVideo()
 
   // ── Traffic Video State ────────────────────────────────────────────────────
   const [trafficFile, setTrafficFile] = useState<File | null>(null)
@@ -247,6 +263,82 @@ export default function AIVision() {
     }
   }, [])
 
+  // ── Handlers: Pothole Video ───────────────────────────────────────────────
+  const processPotholeVideoFile = (file: File) => {
+    setPotholeVideoError(null)
+    const ext = file.name.split('.').pop()?.toLowerCase() || ''
+    if (!['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(ext) && !file.type.startsWith('video/')) {
+      setPotholeVideoError('Please upload a valid video file (MP4, MOV, AVI, MKV, WEBM).')
+      return
+    }
+    if (file.size > 100 * 1024 * 1024) {
+      setPotholeVideoError('Video file size exceeds 100MB limit.')
+      return
+    }
+
+    const objUrl = URL.createObjectURL(file)
+    setPotholeVideoFile(file)
+    setPotholeVideoPreview(objUrl)
+    setPotholeVideoResult(null)
+
+    const tempVid = document.createElement('video')
+    tempVid.preload = 'metadata'
+    tempVid.src = objUrl
+    tempVid.onloadedmetadata = () => {
+      const dur = tempVid.duration || 0
+      const w = tempVid.videoWidth || 1280
+      const h = tempVid.videoHeight || 720
+      const fps = 25.0
+      const totalF = Math.round(dur * fps)
+      setPotholeVideoMeta({
+        fps,
+        duration: dur,
+        width: w,
+        height: h,
+        totalFrames: totalF,
+      })
+    }
+    tempVid.onerror = () => {
+      setPotholeVideoError('Unable to decode video metadata. File may be corrupted or use an unsupported codec.')
+    }
+  }
+
+  const handlePotholeVideoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    processPotholeVideoFile(file)
+    e.target.value = ''
+  }
+
+  const handlePotholeVideoSubmit = () => {
+    if (!potholeVideoFile) return
+    setPotholeVideoError(null)
+    runPotholeVideoAnalysis(
+      {
+        file: potholeVideoFile,
+        road_id: selectedPotholeVideoRoadId,
+        process_every_n_frames: potholeVideoProcessEveryN,
+        conf_threshold: potholeVideoConfThreshold,
+        min_confirmation_frames: potholeVideoMinFrames,
+      },
+      {
+        onSuccess: (data) => {
+          setPotholeVideoResult(data)
+        },
+        onError: (err: any) => {
+          setPotholeVideoError(err.response?.data?.detail || err.message || 'Video pothole analysis failed.')
+        },
+      }
+    )
+  }
+
+  const handleJumpToPotholeTimestamp = (seconds: number) => {
+    if (annotatedPotholeVideoRef.current) {
+      annotatedPotholeVideoRef.current.currentTime = seconds
+      annotatedPotholeVideoRef.current.play().catch(() => {})
+    }
+  }
+
   // ── Handlers: Traffic Video ────────────────────────────────────────────────
   const handleTrafficFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -400,20 +492,30 @@ export default function AIVision() {
       </div>
 
       {/* Tabs */}
-      <div className="flex items-center gap-2 border-b border-gray-800 mb-5">
+      <div className="flex items-center gap-2 border-b border-gray-800 mb-5 overflow-x-auto">
         <button
           onClick={() => setActiveTab('potholes')}
-          className={`pb-3 px-4 text-sm font-semibold transition-all relative ${
+          className={`pb-3 px-4 text-sm font-semibold transition-all relative flex-shrink-0 ${
             activeTab === 'potholes'
               ? 'text-white border-b-2 border-accent'
               : 'text-gray-500 hover:text-gray-300'
           }`}
         >
-          ⬟ Road Image Analysis (Pothole Detection)
+          ⬟ Road Image Analysis (Potholes)
+        </button>
+        <button
+          onClick={() => setActiveTab('pothole-video')}
+          className={`pb-3 px-4 text-sm font-semibold transition-all relative flex-shrink-0 ${
+            activeTab === 'pothole-video'
+              ? 'text-white border-b-2 border-accent'
+              : 'text-gray-500 hover:text-gray-300'
+          }`}
+        >
+          🎥 Road Video Analysis (Potholes)
         </button>
         <button
           onClick={() => setActiveTab('traffic')}
-          className={`pb-3 px-4 text-sm font-semibold transition-all relative ${
+          className={`pb-3 px-4 text-sm font-semibold transition-all relative flex-shrink-0 ${
             activeTab === 'traffic'
               ? 'text-white border-b-2 border-accent'
               : 'text-gray-500 hover:text-gray-300'
@@ -931,7 +1033,406 @@ export default function AIVision() {
       )}
 
       {/* ────────────────────────────────────────────────────────────────────────
-          TAB 2: TRAFFIC VIDEO ANALYSIS (YOLOv8 + ByteTrack)
+          TAB 2: ROAD VIDEO ANALYSIS (POTHOLE TRACKING)
+         ──────────────────────────────────────────────────────────────────────── */}
+      {activeTab === 'pothole-video' && (
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+          {/* Left Column: Input & Controls */}
+          <div className="xl:col-span-1 space-y-4">
+            <div className="card">
+              <div className="card-header flex items-center justify-between">
+                <span>Road Video Input</span>
+                <span className="text-[10px] bg-accent/15 text-accent-light px-2 py-0.5 rounded font-mono font-semibold">
+                  YOLOv8 + IoU Tracking
+                </span>
+              </div>
+
+              {/* Upload Drag & Drop */}
+              <div
+                onClick={() => potholeVideoInputRef.current?.click()}
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setIsDraggingPotholeVideo(true)
+                }}
+                onDragLeave={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setIsDraggingPotholeVideo(false)
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setIsDraggingPotholeVideo(false)
+                  const file = e.dataTransfer.files?.[0]
+                  if (file) processPotholeVideoFile(file)
+                }}
+                className={`border-2 border-dashed rounded-lg p-5 text-center cursor-pointer transition-all duration-150 ${
+                  isDraggingPotholeVideo
+                    ? 'border-accent bg-accent/20 scale-[1.02] shadow-lg shadow-accent/20'
+                    : 'border-gray-700 hover:border-accent/60 bg-navy-900/60'
+                }`}
+              >
+                <input
+                  ref={potholeVideoInputRef}
+                  type="file"
+                  accept="video/mp4,video/quicktime,video/x-msvideo,video/x-matroska,video/webm"
+                  className="hidden"
+                  onChange={handlePotholeVideoFileChange}
+                />
+                <div className="text-3xl mb-1.5">{isDraggingPotholeVideo ? '📥' : '🎥'}</div>
+                <div className="text-white text-sm font-semibold">
+                  {isDraggingPotholeVideo ? 'Drop Road Video Here' : 'Click or Drag & Drop Road Video'}
+                </div>
+                <div className="text-gray-400 text-xs mt-0.5">
+                  Supports MP4, MOV, AVI, MKV, WEBM (&lt; 100MB)
+                </div>
+                {potholeVideoFile && (
+                  <div className="mt-2.5 text-xs bg-accent/15 text-accent-light px-2.5 py-1 rounded inline-block font-mono border border-accent/30 font-semibold">
+                    {potholeVideoFile.name} ({(potholeVideoFile.size / (1024 * 1024)).toFixed(1)} MB)
+                  </div>
+                )}
+              </div>
+
+              {/* Extracted Video Metadata */}
+              {potholeVideoMeta && (
+                <div className="mt-3 p-3 bg-navy-900/80 rounded border border-gray-800 text-xs space-y-1">
+                  <div className="text-gray-400 font-semibold mb-1 border-b border-gray-800 pb-1 flex justify-between">
+                    <span>VIDEO METADATA</span>
+                    <span className="text-emerald-400">Decoded OK</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1 text-[11px] font-mono">
+                    <span className="text-gray-400">Duration:</span>
+                    <span className="text-white text-right font-bold">{potholeVideoMeta.duration.toFixed(1)}s</span>
+                    <span className="text-gray-400">Resolution:</span>
+                    <span className="text-white text-right font-bold">{potholeVideoMeta.width}x{potholeVideoMeta.height}</span>
+                    <span className="text-gray-400">Estimated FPS:</span>
+                    <span className="text-white text-right font-bold">{potholeVideoMeta.fps.toFixed(1)}</span>
+                    <span className="text-gray-400">Total Frames:</span>
+                    <span className="text-white text-right font-bold">~{potholeVideoMeta.totalFrames}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Road Corridor Selection */}
+              <div className="mt-4 space-y-3">
+                <div>
+                  <label className="text-xs text-gray-400 block mb-1">Target Road Corridor:</label>
+                  <select
+                    value={selectedPotholeVideoRoadId || ''}
+                    onChange={(e) => setSelectedPotholeVideoRoadId(e.target.value ? Number(e.target.value) : undefined)}
+                    className="w-full bg-navy-900 border border-gray-700 rounded px-3 py-2 text-xs text-white focus:outline-none focus:border-accent"
+                  >
+                    <option value="">Auto-detect or select road corridor...</option>
+                    {roads.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name} (Risk: {Math.round(r.risk_score)}/100)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Pipeline Tunables */}
+                <div className="p-3 bg-navy-950/60 rounded border border-gray-800/80 space-y-2.5">
+                  <div className="text-[11px] font-bold text-gray-300 uppercase tracking-wider">
+                    Pipeline Parameters
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-gray-400">Frame Sampling Step:</span>
+                      <span className="text-accent font-mono font-bold">Every {potholeVideoProcessEveryN} frame{potholeVideoProcessEveryN > 1 ? 's' : ''}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={1}
+                      max={10}
+                      value={potholeVideoProcessEveryN}
+                      onChange={(e) => setPotholeVideoProcessEveryN(Number(e.target.value))}
+                      className="w-full accent-accent"
+                    />
+                    <div className="text-[10px] text-gray-500">Higher = Faster processing. Lower = Smoother tracking.</div>
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-gray-400">YOLO Confidence Threshold:</span>
+                      <span className="text-amber-400 font-mono font-bold">{(potholeVideoConfThreshold * 100).toFixed(0)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.1}
+                      max={0.9}
+                      step={0.05}
+                      value={potholeVideoConfThreshold}
+                      onChange={(e) => setPotholeVideoConfThreshold(Number(e.target.value))}
+                      className="w-full accent-amber-400"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-gray-400">Min Confirmed Frames:</span>
+                      <span className="text-emerald-400 font-mono font-bold">{potholeVideoMinFrames} frames</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={1}
+                      max={10}
+                      value={potholeVideoMinFrames}
+                      onChange={(e) => setPotholeVideoMinFrames(Number(e.target.value))}
+                      className="w-full accent-emerald-400"
+                    />
+                    <div className="text-[10px] text-gray-500">Filters single-frame transient false positives.</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Submit Button */}
+              <button
+                onClick={handlePotholeVideoSubmit}
+                disabled={!potholeVideoFile || isAnalyzingPotholeVideo}
+                className="btn-primary w-full mt-4 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isAnalyzingPotholeVideo ? (
+                  <>
+                    <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Processing Video & Tracking Potholes...
+                  </>
+                ) : (
+                  '🎥 Run Pothole Video Analysis'
+                )}
+              </button>
+
+              {potholeVideoError && (
+                <div className="mt-3 text-xs bg-red-500/10 border border-red-500/30 text-red-400 p-2.5 rounded">
+                  ✕ {potholeVideoError}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right Column: Display & Results */}
+          <div className="xl:col-span-2 space-y-4">
+            {!potholeVideoPreview && !potholeVideoResult && (
+              <div className="card text-center py-16">
+                <div className="text-4xl mb-3">🎥</div>
+                <div className="text-white font-semibold text-base">No Road Video Loaded</div>
+                <div className="text-gray-400 text-xs mt-1 max-w-md mx-auto">
+                  Upload a dashcam or roadside video above to analyze potholes frame-by-frame, count unique physical defects with spatial IoU tracking, and generate annotated video output.
+                </div>
+              </div>
+            )}
+
+            {potholeVideoPreview && !potholeVideoResult && (
+              <div className="card">
+                <div className="card-header flex items-center justify-between">
+                  <span>Raw Video Preview</span>
+                  <span className="text-xs text-gray-400 font-normal">Ready for AI processing</span>
+                </div>
+                <div className="relative rounded-lg overflow-hidden bg-black aspect-video flex items-center justify-center border border-gray-800">
+                  <video src={potholeVideoPreview} controls className="w-full h-full object-contain" />
+                </div>
+              </div>
+            )}
+
+            {potholeVideoResult && (
+              <div className="space-y-4">
+                {/* KPI Summary Cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="card p-3 border-l-4 border-l-purple-500 bg-navy-800/80">
+                    <div className="text-gray-400 text-xs font-medium">Unique Potholes</div>
+                    <div className="text-2xl font-black text-purple-300 font-mono mt-0.5">
+                      {potholeVideoResult.summary.unique_potholes_count}
+                    </div>
+                    <div className="text-[10px] text-purple-400/80 mt-0.5">Deduplicated across frames</div>
+                  </div>
+
+                  <div className="card p-3 border-l-4 border-l-red-500 bg-navy-800/80">
+                    <div className="text-gray-400 text-xs font-medium">High Severity</div>
+                    <div className="text-2xl font-black text-red-400 font-mono mt-0.5">
+                      {potholeVideoResult.summary.high_severity_count}
+                    </div>
+                    <div className="text-[10px] text-gray-400 mt-0.5">Requires priority repair</div>
+                  </div>
+
+                  <div className="card p-3 border-l-4 border-l-amber-500 bg-navy-800/80">
+                    <div className="text-gray-400 text-xs font-medium">Raw Detections</div>
+                    <div className="text-2xl font-black text-amber-300 font-mono mt-0.5">
+                      {potholeVideoResult.summary.total_raw_detections}
+                    </div>
+                    <div className="text-[10px] text-gray-400 mt-0.5">Across {potholeVideoResult.summary.frames_analyzed} frames</div>
+                  </div>
+
+                  <div className="card p-3 border-l-4 border-l-emerald-500 bg-navy-800/80">
+                    <div className="text-gray-400 text-xs font-medium">Avg Confidence</div>
+                    <div className="text-2xl font-black text-emerald-400 font-mono mt-0.5">
+                      {(potholeVideoResult.summary.average_confidence * 100).toFixed(0)}%
+                    </div>
+                    <div className="text-[10px] text-gray-400 mt-0.5">
+                      In {potholeVideoResult.summary.processing_time_seconds.toFixed(1)}s
+                    </div>
+                  </div>
+                </div>
+
+                {/* Annotated Video Player */}
+                <div className="card p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-base font-bold text-white">Annotated Pothole Video</span>
+                      <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-2 py-0.5 rounded font-mono font-semibold">
+                        YOLO Bounding Boxes & Tracks
+                      </span>
+                    </div>
+                    <a
+                      href={potholeVideoResult.video_url}
+                      download
+                      className="text-xs text-accent hover:underline flex items-center gap-1 font-semibold"
+                    >
+                      📥 Download Output MP4
+                    </a>
+                  </div>
+
+                  <div className="relative rounded-lg overflow-hidden bg-black aspect-video border border-gray-800 shadow-xl">
+                    <video
+                      ref={annotatedPotholeVideoRef}
+                      src={potholeVideoResult.video_url}
+                      controls
+                      className="w-full h-full object-contain"
+                    />
+                  </div>
+
+                  <div className="mt-2 text-xs text-gray-400 flex items-center justify-between">
+                    <span>Corridor: <strong className="text-white">{potholeVideoResult.location_summary}</strong></span>
+                    <span>Processed: {new Date(potholeVideoResult.processed_at).toLocaleString()}</span>
+                  </div>
+                </div>
+
+                {/* Keyframe Snapshots & Unique Track Gallery */}
+                <div className="card p-4">
+                  <div className="card-header flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <span>Unique Pothole Keyframes</span>
+                      <span className="text-xs bg-navy-700 text-gray-300 px-2 py-0.5 rounded font-mono">
+                        {potholeVideoResult.unique_tracks.length} Tracks
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-gray-400">Click snapshot to jump video to timestamp</span>
+                  </div>
+
+                  {potholeVideoResult.unique_tracks.length === 0 ? (
+                    <div className="text-center py-8 text-gray-400 text-xs">
+                      No potholes exceeded the temporal confirmation threshold in this video.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {potholeVideoResult.unique_tracks.map((track) => {
+                        const sevColor =
+                          track.severity === 'HIGH' ? 'bg-red-900/60 text-red-300 border-red-700' :
+                          track.severity === 'MEDIUM' ? 'bg-amber-900/60 text-amber-300 border-amber-700' :
+                          'bg-emerald-900/60 text-emerald-300 border-emerald-700'
+
+                        return (
+                          <div
+                            key={track.track_id}
+                            className="bg-navy-900/90 border border-gray-800 rounded-lg p-2.5 flex flex-col justify-between hover:border-accent/50 transition-colors"
+                          >
+                            <div>
+                              <div className="relative rounded overflow-hidden aspect-video bg-black mb-2 border border-gray-800 group">
+                                {track.snapshot_url ? (
+                                  <img
+                                    src={track.snapshot_url}
+                                    alt={track.track_id}
+                                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                                  />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center text-gray-600 text-xs font-mono">
+                                    No Snapshot
+                                  </div>
+                                )}
+                                <div className="absolute top-1 left-1 bg-black/80 px-1.5 py-0.5 rounded text-[10px] font-mono text-accent font-bold">
+                                  {track.track_id}
+                                </div>
+                                <div className="absolute bottom-1 right-1 bg-black/80 px-1.5 py-0.5 rounded text-[10px] font-mono text-gray-300">
+                                  {track.best_timestamp_seconds.toFixed(1)}s
+                                </div>
+                              </div>
+
+                              <div className="flex items-center justify-between text-xs mb-1">
+                                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${sevColor}`}>
+                                  {track.severity} SEVERITY
+                                </span>
+                                <span className="font-mono text-emerald-400 font-bold text-[11px]">
+                                  {(track.max_confidence * 100).toFixed(0)}% Conf
+                                </span>
+                              </div>
+
+                              <div className="text-[11px] text-gray-400 font-mono space-y-0.5">
+                                <div>Frame Range: #{track.first_seen_frame} - #{track.last_seen_frame}</div>
+                                <div>Confirmations: {track.total_confirmations} frames</div>
+                              </div>
+                            </div>
+
+                            <button
+                              onClick={() => handleJumpToPotholeTimestamp(track.best_timestamp_seconds)}
+                              className="w-full mt-2 text-xs bg-accent/20 hover:bg-accent/35 text-accent-light py-1.5 px-2 rounded border border-accent/40 text-center font-semibold transition-colors flex items-center justify-center gap-1"
+                            >
+                              <span>⏱️ Jump to {track.best_timestamp_seconds.toFixed(1)}s</span>
+                            </button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Video Detection Timeline Table */}
+                <div className="card p-4">
+                  <div className="card-header mb-3">Detection Timeline & Tracking Log</div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs text-left">
+                      <thead className="bg-navy-900 text-gray-400 uppercase font-mono text-[10px]">
+                        <tr>
+                          <th className="p-2">Frame #</th>
+                          <th className="p-2">Timestamp</th>
+                          <th className="p-2">Detections</th>
+                          <th className="p-2">Active Track IDs</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-800 font-mono">
+                        {potholeVideoResult.timeline.map((item) => (
+                          <tr key={item.frame_number} className="hover:bg-navy-800/40">
+                            <td className="p-2 text-white">#{item.frame_number}</td>
+                            <td className="p-2 text-accent">{item.timestamp_seconds.toFixed(2)}s</td>
+                            <td className="p-2 text-amber-300 font-bold">{item.detections_in_frame}</td>
+                            <td className="p-2">
+                              {item.active_track_ids.map((id) => (
+                                <span
+                                  key={id}
+                                  onClick={() => {
+                                    const tr = potholeVideoResult.unique_tracks.find((t) => t.track_id === id)
+                                    if (tr) handleJumpToPotholeTimestamp(tr.best_timestamp_seconds)
+                                  }}
+                                  className="inline-block bg-purple-900/40 text-purple-300 border border-purple-700/50 px-1.5 py-0.5 rounded text-[10px] mr-1 cursor-pointer hover:bg-purple-800/60"
+                                >
+                                  {id}
+                                </span>
+                              ))}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ────────────────────────────────────────────────────────────────────────
+          TAB 3: TRAFFIC VIDEO ANALYSIS (YOLOv8 + ByteTrack)
          ──────────────────────────────────────────────────────────────────────── */}
       {activeTab === 'traffic' && (
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">

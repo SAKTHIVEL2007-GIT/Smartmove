@@ -577,3 +577,98 @@ export interface SmartJunctionDisplayState {
   active_near_misses_count: number
   recent_conflict: TrafficConflictDetail | null
 }
+
+export interface UniquePotholeTrack {
+  track_id: string
+  first_seen_frame: number
+  last_seen_frame: number
+  total_confirmations: number
+  max_confidence: number
+  severity: string
+  estimated_area_sq_m: number
+  best_frame_number: number
+  best_timestamp_seconds: number
+  snapshot_url?: string | null
+  // Legacy / Alias fields
+  pothole_id?: number
+  first_seen_timestamp?: string
+  last_seen_timestamp?: string
+  first_seen_seconds?: number
+  last_seen_seconds?: number
+  average_confidence?: number
+  risk_score?: number
+  box?: BoundingBox
+  frame_count?: number
+}
+
+export interface PotholeVideoTimelineItem {
+  frame_number: number
+  timestamp_seconds: number
+  detections_in_frame: number
+  active_track_ids: string[]
+  // Legacy / Alias fields
+  pothole_id?: number
+  timestamp_str?: string
+  frame_index?: number
+  confidence?: number
+  severity?: string
+  snapshot_url?: string
+}
+
+export interface VideoMeta {
+  filename: string
+  duration_seconds: number
+  fps: number
+  total_frames: number
+  width: number
+  height: number
+  codec?: string | null
+}
+
+export interface PotholeVideoAnalysisSummary {
+  frames_analyzed: number
+  total_raw_detections: number
+  unique_potholes_count: number
+  high_severity_count: number
+  medium_severity_count: number
+  low_severity_count: number
+  average_confidence: number
+  processing_time_seconds: number
+  // Legacy / Alias fields
+  process_every_n_frames?: number
+  confidence_threshold?: number
+  unique_potholes?: number
+  total_detections?: number
+  max_confidence?: number
+}
+
+export interface PotholeVideoAnalysisResult {
+  analysis_id: string
+  video_url: string
+  road_id?: number | null
+  road_name?: string | null
+  location_summary: string
+  meta: VideoMeta
+  summary: PotholeVideoAnalysisSummary
+  unique_tracks: UniquePotholeTrack[]
+  timeline: PotholeVideoTimelineItem[]
+  processed_at: string
+  // Legacy / Alias fields
+  success?: boolean
+  video_id?: string
+  is_demo_mode?: boolean
+  model_status?: string
+  status_message?: string
+  model_path?: string
+  video?: VideoMeta
+  analysis?: PotholeVideoAnalysisSummary
+  unique_potholes?: UniquePotholeTrack[]
+  original_video_url?: string
+  processed_video_url?: string
+  latitude?: number | null
+  longitude?: number | null
+  gps_source?: string
+  created_hazard_ids?: number[]
+  timestamp?: string
+  disclaimer?: string
+}
