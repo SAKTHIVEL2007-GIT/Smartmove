@@ -16,7 +16,7 @@ import backend.models  # Ensures all ORM models are registered with Base.metadat
 from backend.routers import (
     dashboard, roads, hazards, danger_zones, repair,
     junctions, interventions, reports, ai_vision, routes,
-    road_intelligence, conflicts, evidence
+    road_intelligence, conflicts, evidence, risk
 )
 from backend.seed import seed_all
 
@@ -74,6 +74,7 @@ app.include_router(routes.router, prefix="/api", tags=["Routes"])
 app.include_router(road_intelligence.router, prefix="/api", tags=["Road Intelligence"])
 app.include_router(conflicts.router, prefix="/api", tags=["Traffic Conflicts"])
 app.include_router(evidence.router, prefix="/api", tags=["Evidence & Audit"])
+app.include_router(risk.router, prefix="/api", tags=["Risk Engine & Simulator"])
 
 
 @app.get("/", tags=["Health"])

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from backend.database import get_db
 from backend.models import CitizenReport, Hazard, Road, AuditLog
 from backend.schemas import CitizenReportCreate, CitizenReportOut, CitizenReportStatusUpdate
-from backend.services.risk_engine import risk_engine
+from backend.services.risk_engine import evaluate_road_risk
 
 router = APIRouter()
 
@@ -119,7 +119,8 @@ def update_report_status(
             # Recalculate road risk
             road = db.query(Road).filter(Road.id == linked_hazard.road_id).first()
             if road:
-                risk_engine.evaluate_road(road, db)
+                eval_res = evaluate_road_risk(road.id, db)
+                road.risk_score = eval_res["risk_score"]
     elif payload.status == "Rejected":
         if linked_hazard:
             linked_hazard.status = "rejected"

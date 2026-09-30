@@ -6,6 +6,7 @@ import type {
   RoadSafetyEvaluation, PrioritizedRepairItem, MunicipalRepairStatus,
   RouteComparisonResult, SmartJunctionDisplayState,
   RoadSegmentDossier, EvidenceFile, AuditLog, NearMiss, DecisionAuditRecord,
+  RiskEvaluationResult, InterventionSimulationResult, InterventionComparisonResult,
 } from '@/types'
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -371,6 +372,30 @@ export function useDecisionAudits() {
   return useQuery<DecisionAuditRecord[]>({
     queryKey: ['decision-audits'],
     queryFn: async () => (await api.get('/api/evidence/decisions')).data,
+  })
+}
+
+// ── Risk Engine & What-If Municipal Simulator (Part 1 & 2) ───────────────────
+export function useRoadRiskEvaluation(roadId: number | null) {
+  return useQuery<RiskEvaluationResult>({
+    queryKey: ['risk-evaluation', roadId],
+    queryFn: async () => (await api.get(`/api/risk/evaluate/${roadId}`)).data,
+    enabled: roadId !== null,
+  })
+}
+
+export function useSimulateIntervention() {
+  return useMutation<InterventionSimulationResult, Error, { road_id: number; intervention: string }>({
+    mutationFn: async ({ road_id, intervention }) =>
+      (await api.post('/api/interventions/simulate', { road_id, intervention })).data,
+  })
+}
+
+export function useInterventionComparisonChart(roadId: number | null) {
+  return useQuery<InterventionComparisonResult>({
+    queryKey: ['intervention-comparison', roadId],
+    queryFn: async () => (await api.get(`/api/interventions/compare/${roadId}`)).data,
+    enabled: roadId !== null,
   })
 }
 

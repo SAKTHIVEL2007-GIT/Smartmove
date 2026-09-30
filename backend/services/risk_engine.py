@@ -1,250 +1,335 @@
 """
-SafeCity Loop V2 — Centralized Risk Engine
-Calculates normalized multi-factor road risk according to the GovTech formula:
-Risk = 0.30H + 0.20E + 0.20C + 0.15V + 0.10P + 0.05U
-Where:
-  H = Hazard Severity (0–100)
-  E = Traffic Exposure (0–100)
-  C = Conflict Evidence (0–100)
-  V = Vulnerable-User Exposure (0–100)
-  P = Persistence / Repeated Observations (0–100)
-  U = Road Importance / Urgency (0–100)
+SafeCity Loop V2 — Transparent Risk Calculation Engine & What-If Simulator
+Implements transparent 0–100 road risk calculation formula, factor breakdown,
+configurable intervention assumptions, factor transition clamping, and dynamic comparison.
 """
-from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
-from backend.models import Road, Hazard, NearMiss, Junction
-from backend.services.data_quality_service import data_quality_service
+import math
 
 
-class RiskEngine:
+RISK_WEIGHTS: Dict[str, float] = {
+    "hazard_severity": 0.30,
+    "traffic_exposure": 0.20,
+    "vulnerable_users": 0.20,
+    "near_miss_risk": 0.15,
+    "road_condition": 0.10,
+    "aging": 0.05,
+}
+
+# Configurable intervention simulation assumptions (Part 2)
+# Factor deltas (negative = risk factor reduction)
+INTERVENTION_EFFECTS: Dict[str, Dict[str, Any]] = {
+    "speed_bump": {
+        "name": "Speed Bump & Chicane Installation",
+        "type": "speed-bump",
+        "deltas": {
+            "traffic_exposure": -0.15,
+            "vulnerable_users": -0.05,
+            "near_miss_risk": -0.25,
+            "road_condition": 0.0,
+            "hazard_severity": 0.0,
+            "aging": 0.0,
+        },
+        "description": "Reduces traffic speed, vehicle throughput, and mid-block near-miss conflicts.",
+    },
+    "pedestrian_refuge_island": {
+        "name": "Pedestrian Refuge Island & Solar Signage",
+        "type": "signage",
+        "deltas": {
+            "traffic_exposure": 0.0,
+            "vulnerable_users": -0.30,
+            "near_miss_risk": -0.35,
+            "road_condition": 0.0,
+            "hazard_severity": 0.0,
+            "aging": 0.0,
+        },
+        "description": "Protects crossing pedestrians and cyclists; dramatically lowers crossing conflicts.",
+    },
+    "road_resurfacing": {
+        "name": "Full Road Surface Reconstruction",
+        "type": "resurfacing",
+        "deltas": {
+            "hazard_severity": -0.40,
+            "road_condition": -0.50,
+            "near_miss_risk": -0.10,
+            "traffic_exposure": 0.0,
+            "vulnerable_users": 0.0,
+            "aging": -0.30,
+        },
+        "description": "Eliminates asphalt fatigue, potholes, and rutting; improves skid resistance.",
+    },
+    "micro_surfacing": {
+        "name": "Micro-Surfacing & Anti-Skid Epoxy",
+        "type": "resurfacing",
+        "deltas": {
+            "hazard_severity": -0.45,
+            "road_condition": -0.55,
+            "near_miss_risk": -0.15,
+            "traffic_exposure": 0.0,
+            "vulnerable_users": 0.0,
+            "aging": -0.40,
+        },
+        "description": "High-durability polymer seal coat for surface restoration and friction enhancement.",
+    },
+    "speed_cushions": {
+        "name": "Dual Speed Cushions",
+        "type": "speed-bump",
+        "deltas": {
+            "traffic_exposure": -0.10,
+            "near_miss_risk": -0.20,
+            "vulnerable_users": -0.05,
+            "hazard_severity": 0.0,
+            "road_condition": 0.0,
+            "aging": 0.0,
+        },
+        "description": "Calibrates vehicle speeds without obstructing emergency vehicles.",
+    },
+}
+
+
+def clamp(val: float, min_val: float = 0.0, max_val: float = 1.0) -> float:
+    """Utility to clamp float values to [min_val, max_val]."""
+    return max(min_val, min(max_val, val))
+
+
+def calculate_risk_score(
+    factors: Dict[str, float],
+    weights: Optional[Dict[str, float]] = None
+) -> Tuple[float, Dict[str, Dict[str, Any]]]:
     """
-    Centralized scientific Risk Engine for SafeCity Loop V2.
+    Transparent Risk Engine (Part 1).
+    Formula:
+    Risk Score = 100 * (
+        0.30 * Hazard Severity
+      + 0.20 * Traffic Exposure
+      + 0.20 * Vulnerable User Exposure
+      + 0.15 * Near-Miss Risk
+      + 0.10 * Road Condition
+      + 0.05 * Aging / SLA
+    )
+    All factors normalized between 0.0 and 1.0.
+    Final score clamped to [0, 100].
+    
+    Returns:
+        (total_score: float, breakdown: Dict[str, Dict[str, Any]])
     """
+    w_map = weights or RISK_WEIGHTS
+    
+    # Ensure weights sum to 1.0
+    total_w = sum(w_map.values())
+    if abs(total_w - 1.0) > 1e-4:
+        # Normalize weights if custom
+        w_map = {k: v / total_w for k, v in w_map.items()}
 
-    # Weights
-    WEIGHT_H = 0.30
-    WEIGHT_E = 0.20
-    WEIGHT_C = 0.20
-    WEIGHT_V = 0.15
-    WEIGHT_P = 0.10
-    WEIGHT_U = 0.05
+    breakdown: Dict[str, Dict[str, Any]] = {}
+    weighted_sum = 0.0
 
-    @classmethod
-    def classify_risk(cls, score: float) -> str:
-        """
-        Classifies risk into standard GovTech safety tiers.
-        Never outputs 'SAFE' because an unmonitored or low-risk road is not guaranteed accident-free.
-        """
-        if score >= 80.0:
-            return "VERY HIGH CALCULATED RISK"
-        elif score >= 55.0:
-            return "HIGH CALCULATED RISK"
-        elif score >= 30.0:
-            return "MODERATE CALCULATED RISK"
-        else:
-            return "LOWER CALCULATED RISK"
+    factor_labels = {
+        "hazard_severity": "Hazard Severity",
+        "traffic_exposure": "Traffic Exposure",
+        "vulnerable_users": "Vulnerable Users Exposure",
+        "near_miss_risk": "Near-Miss Risk",
+        "road_condition": "Road Condition / Degradation",
+        "aging": "Aging / SLA Time",
+    }
 
-    @classmethod
-    def calculate_factors(cls, road: Road, db: Session) -> Dict[str, float]:
-        """
-        Extracts and normalizes the 6 core components (0–100).
-        """
-        hazards = db.query(Hazard).filter(Hazard.road_id == road.id).all()
-        conflicts = db.query(NearMiss).filter(
-            (NearMiss.road_id == road.id) | 
-            (NearMiss.junction_id.in_([j.id for j in db.query(Junction).all() if abs(j.latitude - road.latitude) < 0.008 and abs(j.longitude - road.longitude) < 0.008]))
-        ).all()
+    for key, weight in w_map.items():
+        raw_val = factors.get(key, 0.5)
+        norm_val = clamp(float(raw_val), 0.0, 1.0)
+        contrib = norm_val * weight * 100.0
+        max_points = weight * 100.0
 
-        # 1. H: Hazard Severity (0–100)
-        severity_map = {"CRITICAL": 100.0, "HIGH": 75.0, "MEDIUM": 45.0, "LOW": 20.0}
-        if hazards:
-            hazard_scores = [severity_map.get(h.severity.upper(), 45.0) for h in hazards]
-            # Max severity + volume contribution
-            max_h = max(hazard_scores)
-            count_bonus = min(25.0, (len(hazards) - 1) * 6.0)
-            H = min(100.0, max_h + count_bonus)
-        else:
-            H = 15.0  # Baseline residual uncertainty
-
-        # 2. E: Traffic Exposure (0–100)
-        exposure_map = {"VERY HIGH": 95.0, "HIGH": 80.0, "MEDIUM": 50.0, "LOW": 25.0}
-        E = exposure_map.get((road.traffic_exposure or "MEDIUM").upper(), 50.0)
-
-        # 3. C: Conflict Evidence (0–100)
-        if conflicts:
-            conflict_scores = []
-            for c in conflicts:
-                ttc = c.ttc if c.ttc is not None else 1.8
-                # Shorter TTC = higher conflict score
-                ttc_score = max(0.0, min(100.0, (2.5 - ttc) * 50.0))
-                severity_bonus = 20.0 if (c.risk_level or "").upper() == "CRITICAL" else 10.0
-                conflict_scores.append(min(100.0, ttc_score + severity_bonus))
-            C = min(100.0, max(conflict_scores) + min(20.0, len(conflicts) * 5.0))
-        else:
-            C = 10.0  # Baseline residual conflict potential
-
-        # 4. V: Vulnerable-User Exposure (0–100)
-        vuln_map = {"HIGH": 90.0, "MEDIUM": 55.0, "LOW": 20.0}
-        if getattr(road, "vulnerability_score", None) is not None and road.vulnerability_score > 0:
-            V = float(road.vulnerability_score)
-        else:
-            V = vuln_map.get((road.vulnerability or "MEDIUM").upper(), 55.0)
-        # Bonus for school zones or hospitals
-        if "school" in road.name.lower() or getattr(road, "road_type", "") == "school_zone":
-            V = max(V, 92.0)
-        elif "hospital" in road.name.lower():
-            V = max(V, 82.0)
-
-        # 5. P: Persistence / Repeated Observations (0–100)
-        total_obs = len(hazards) + len(conflicts)
-        P = min(100.0, total_obs * 18.0)
-
-        # 6. U: Road Importance / Urgency (0–100)
-        type_importance = {
-            "urban_arterial": 80.0,
-            "school_zone": 95.0,
-            "transit_corridor": 85.0,
-            "industrial": 60.0,
-            "local_residential": 35.0
-        }
-        road_type = getattr(road, "road_type", "urban_arterial")
-        U = type_importance.get(road_type, getattr(road, "importance_score", 50.0) or 50.0)
-
-        return {
-            "H": round(H, 1),
-            "E": round(E, 1),
-            "C": round(C, 1),
-            "V": round(V, 1),
-            "P": round(P, 1),
-            "U": round(U, 1),
+        weighted_sum += contrib
+        breakdown[key] = {
+            "label": factor_labels.get(key, key),
+            "normalized_value": round(norm_val, 3),
+            "weight": round(weight, 3),
+            "max_points": round(max_points, 1),
+            "contribution_points": round(contrib, 1),
+            "status": "AVAILABLE" if key in factors else "DEFAULT_ESTIMATE",
         }
 
-    @classmethod
-    def evaluate_road(cls, road: Road, db: Session) -> Dict[str, Any]:
-        """
-        Executes full evaluation:
-        Risk = 0.30H + 0.20E + 0.20C + 0.15V + 0.10P + 0.05U
-        """
-        factors = cls.calculate_factors(road, db)
-        
-        raw_risk = (
-            cls.WEIGHT_H * factors["H"] +
-            cls.WEIGHT_E * factors["E"] +
-            cls.WEIGHT_C * factors["C"] +
-            cls.WEIGHT_V * factors["V"] +
-            cls.WEIGHT_P * factors["P"] +
-            cls.WEIGHT_U * factors["U"]
-        )
-        
-        risk_score = round(max(0.0, min(100.0, raw_risk)), 1)
-        safe_city_score = round(max(0.0, min(100.0, 100.0 - risk_score)), 1)
-        classification = cls.classify_risk(risk_score)
-        quality = data_quality_service.evaluate_road_data_quality(road, db)
+    final_score = round(clamp(weighted_sum, 0.0, 100.0), 1)
+    return final_score, breakdown
 
-        # Sync back to road record in DB
-        road.risk_score = risk_score
-        road.safe_city_score = safe_city_score
-        road.risk_confidence = quality["model_confidence"]
-        road.data_coverage = quality["coverage_percentage"]
-        db.commit()
 
-        # Format factor breakdown with human-readable weights and contributions
-        contributing_factors = {
-            "hazard_severity": {
-                "score": factors["H"],
-                "weight": cls.WEIGHT_H,
-                "weighted_contribution": round(cls.WEIGHT_H * factors["H"], 1),
-                "max_points": 30,
-                "points_display": f"{round(cls.WEIGHT_H * factors['H'])}/30",
-                "label": "Observed Defects & Hazard Severity (30%)"
-            },
-            "traffic_exposure": {
-                "score": factors["E"],
-                "weight": cls.WEIGHT_E,
-                "weighted_contribution": round(cls.WEIGHT_E * factors["E"], 1),
-                "max_points": 20,
-                "points_display": f"{round(cls.WEIGHT_E * factors['E'])}/20",
-                "label": "Vehicle Traffic Volume & Exposure (20%)"
-            },
-            "conflict_evidence": {
-                "score": factors["C"],
-                "weight": cls.WEIGHT_C,
-                "weighted_contribution": round(cls.WEIGHT_C * factors["C"], 1),
-                "max_points": 20,
-                "points_display": f"{round(cls.WEIGHT_C * factors['C'])}/20",
-                "label": "Near-Miss & Traffic Conflict Evidence (20%)"
-            },
-            "vulnerable_user_exposure": {
-                "score": factors["V"],
-                "weight": cls.WEIGHT_V,
-                "weighted_contribution": round(cls.WEIGHT_V * factors["V"], 1),
-                "max_points": 15,
-                "points_display": f"{round(cls.WEIGHT_V * factors['V'])}/15",
-                "label": "Pedestrian & Cyclist Vulnerability (15%)"
-            },
-            "persistence": {
-                "score": factors["P"],
-                "weight": cls.WEIGHT_P,
-                "weighted_contribution": round(cls.WEIGHT_P * factors["P"], 1),
-                "max_points": 10,
-                "points_display": f"{round(cls.WEIGHT_P * factors['P'])}/10",
-                "label": "Recurring Hotspot / Defect Persistence (10%)"
-            },
-            "road_importance": {
-                "score": factors["U"],
-                "weight": cls.WEIGHT_U,
-                "weighted_contribution": round(cls.WEIGHT_U * factors["U"], 1),
-                "max_points": 5,
-                "points_display": f"{round(cls.WEIGHT_U * factors['U'])}/5",
-                "label": "Network Criticality & Urgency (5%)"
-            }
+def apply_intervention_effects(
+    current_factors: Dict[str, float],
+    intervention_key: str
+) -> Tuple[Dict[str, float], Dict[str, Dict[str, Any]]]:
+    """
+    Applies configurable intervention deltas to current factors and clamps to [0.0, 1.0].
+    Returns:
+        (projected_factors: Dict, factor_transitions: Dict)
+    """
+    effect_data = INTERVENTION_EFFECTS.get(intervention_key, {})
+    deltas = effect_data.get("deltas", {})
+
+    projected_factors: Dict[str, float] = {}
+    transitions: Dict[str, Dict[str, Any]] = {}
+
+    all_keys = set(current_factors.keys()).union(RISK_WEIGHTS.keys())
+
+    for key in all_keys:
+        before_val = clamp(float(current_factors.get(key, 0.5)), 0.0, 1.0)
+        delta = float(deltas.get(key, 0.0))
+        after_val = clamp(before_val + delta, 0.0, 1.0)
+
+        projected_factors[key] = after_val
+        transitions[key] = {
+            "factor_key": key,
+            "before_normalized": round(before_val, 3),
+            "after_normalized": round(after_val, 3),
+            "delta": round(after_val - before_val, 3),
+            "is_modified": abs(after_val - before_val) > 1e-4,
         }
 
-        contributors_summary = [
-            {"factor": "hazard_severity", "label": "Hazard severity", "score": factors["H"], "points": round(cls.WEIGHT_H * factors["H"], 1), "max": 30, "display": f"{round(cls.WEIGHT_H * factors['H'])}/30"},
-            {"factor": "traffic_exposure", "label": "Traffic exposure", "score": factors["E"], "points": round(cls.WEIGHT_E * factors["E"], 1), "max": 20, "display": f"{round(cls.WEIGHT_E * factors['E'])}/20"},
-            {"factor": "conflict_evidence", "label": "Conflict evidence", "score": factors["C"], "points": round(cls.WEIGHT_C * factors["C"], 1), "max": 20, "display": f"{round(cls.WEIGHT_C * factors['C'])}/20"},
-            {"factor": "vulnerable_user_exposure", "label": "Vulnerable users", "score": factors["V"], "points": round(cls.WEIGHT_V * factors["V"], 1), "max": 15, "display": f"{round(cls.WEIGHT_V * factors['V'])}/15"},
-            {"factor": "persistence", "label": "Persistence", "score": factors["P"], "points": round(cls.WEIGHT_P * factors["P"], 1), "max": 10, "display": f"{round(cls.WEIGHT_P * factors['P'])}/10"},
-            {"factor": "road_importance", "label": "Road importance", "score": factors["U"], "points": round(cls.WEIGHT_U * factors["U"], 1), "max": 5, "display": f"{round(cls.WEIGHT_U * factors['U'])}/5"},
-        ]
-
-        # Danger zone flag
-        is_danger_zone = risk_score >= 55.0
-
-        return {
-            "road_id": road.id,
-            "road_name": road.name,
-            "road_type": getattr(road, "road_type", "urban_arterial"),
-            "risk_score": risk_score,
-            "safe_city_score": safe_city_score,
-            "classification": classification,
-            "is_danger_zone": is_danger_zone,
-            "confidence": quality["model_confidence"],
-            "confidence_tier": quality["confidence_tier"],
-            "data_coverage": quality["coverage_percentage"],
-            "coverage_tier": quality["coverage_tier"],
-            "data_freshness": quality["data_freshness"],
-            "quality_warning": quality["quality_warning"],
-            "formula": "Risk = 0.30*H + 0.20*E + 0.20*C + 0.15*V + 0.10*P + 0.05*U",
-            "factors": factors,
-            "contributing_factors": contributing_factors,
-            "contributors_summary": contributors_summary,
-            "last_updated": datetime.utcnow().isoformat(),
-            "disclaimer": "Calculated decision-support score from empirical observations. Does not claim certainty of future collision occurrence."
-        }
-
-    @classmethod
-    def evaluate_all(cls, db: Session) -> List[Dict[str, Any]]:
-        """
-        Evaluates all road segments in the monitored network.
-        """
-        roads = db.query(Road).all()
-        results = [cls.evaluate_road(r, db) for r in roads]
-        # Sort by highest risk score descending
-        results.sort(key=lambda x: x["risk_score"], reverse=True)
-        return results
+    return projected_factors, transitions
 
 
-risk_engine = RiskEngine()
+def evaluate_road_risk(road_id: int, db: Session) -> Dict[str, Any]:
+    """
+    Evaluates current risk score for a road segment using DB data or seed metadata.
+    """
+    from backend.models import Road, Hazard, NearMiss
+
+    road = db.query(Road).filter(Road.id == road_id).first()
+    if not road:
+        raise ValueError(f"Road ID {road_id} not found.")
+
+    hazards = db.query(Hazard).filter(Hazard.road_id == road_id, Hazard.status == "active").all()
+    conflicts = db.query(NearMiss).filter(NearMiss.road_id == road_id).all()
+
+    # 1. Hazard Severity Factor
+    if hazards:
+        sev_map = {"CRITICAL": 1.0, "HIGH": 0.75, "MEDIUM": 0.50, "LOW": 0.25}
+        highest_sev = max((h.severity or "MEDIUM").upper() for h in hazards)
+        hazard_factor = sev_map.get(highest_sev, 0.50)
+    else:
+        hazard_factor = 0.20
+
+    # 2. Traffic Exposure Factor
+    exp = (road.traffic_exposure or "MEDIUM").upper()
+    traffic_factor = 0.85 if exp == "HIGH" else 0.50 if exp == "MEDIUM" else 0.25
+
+    # 3. Vulnerable Users Factor
+    rtype = (road.road_type or "").lower()
+    if "school" in rtype or "hospital" in rtype:
+        vuln_factor = 0.85
+    elif "arterial" in rtype:
+        vuln_factor = 0.65
+    else:
+        vuln_factor = 0.40
+
+    # 4. Near-Miss Risk Factor
+    if conflicts:
+        conflict_count = len(conflicts)
+        min_ttc = min((c.ttc_seconds or 2.0) for c in conflicts)
+        near_miss_factor = clamp(0.30 + (conflict_count * 0.10) + (1.5 / max(min_ttc, 0.5)) * 0.20, 0.0, 1.0)
+    else:
+        near_miss_factor = 0.30
+
+    # 5. Road Condition Factor
+    road_cond_factor = clamp(road.risk_score / 100.0, 0.15, 0.95)
+
+    # 6. Aging / SLA Factor
+    aging_factor = 0.40
+
+    factors = {
+        "hazard_severity": hazard_factor,
+        "traffic_exposure": traffic_factor,
+        "vulnerable_users": vuln_factor,
+        "near_miss_risk": near_miss_factor,
+        "road_condition": road_cond_factor,
+        "aging": aging_factor,
+    }
+
+    score, breakdown = calculate_risk_score(factors)
+
+    # Provenance label
+    data_source = "REAL VIDEO & DB DATA" if hazards or conflicts else "DEMO ROAD DATA"
+
+    return {
+        "mode": "current",
+        "data_source": data_source,
+        "road_id": road.id,
+        "road_name": road.name,
+        "risk_score": score,
+        "observed_conflicts": len(conflicts),
+        "observation_note": "Observed real-time corridor telemetry & active hazards",
+        "factors": breakdown,
+        "raw_factors": factors,
+    }
+
+
+def simulate_road_intervention(
+    road_id: int,
+    intervention_key: str,
+    db: Session
+) -> Dict[str, Any]:
+    """
+    Simulates projected safety impact of an intervention on a candidate road segment (Part 2).
+    """
+    current_eval = evaluate_road_risk(road_id, db)
+    current_risk = current_eval["risk_score"]
+    current_factors = current_eval["raw_factors"]
+
+    if intervention_key not in INTERVENTION_EFFECTS:
+        intervention_key = "speed_bump"
+
+    effect_info = INTERVENTION_EFFECTS[intervention_key]
+    projected_factors, transitions = apply_intervention_effects(current_factors, intervention_key)
+
+    projected_risk, projected_breakdown = calculate_risk_score(projected_factors)
+
+    change_points = round(projected_risk - current_risk, 1)
+    reduction_percent = round(((current_risk - projected_risk) / max(current_risk, 1.0)) * 100.0, 1)
+
+    return {
+        "mode": "simulation",
+        "data_source": "WHAT-IF SIMULATION",
+        "road_id": road_id,
+        "road_name": current_eval["road_name"],
+        "intervention_key": intervention_key,
+        "intervention_name": effect_info["name"],
+        "intervention_type": effect_info["type"],
+        "current_risk": current_risk,
+        "projected_risk": projected_risk,
+        "change_points": change_points,
+        "reduction_percent": reduction_percent,
+        "factor_transitions": transitions,
+        "projected_factors_breakdown": projected_breakdown,
+        "disclaimer": (
+            "Projected results are generated from current measured road-risk factors and "
+            "configurable intervention-effect assumptions. They are simulations, not guaranteed real-world outcomes."
+        ),
+    }
+
+
+def compare_road_interventions(road_id: int, db: Session) -> Dict[str, Any]:
+    """
+    Generates dynamic comparison chart dataset comparing Current Risk vs all candidate interventions (Part 2).
+    """
+    current_eval = evaluate_road_risk(road_id, db)
+    current_risk = current_eval["risk_score"]
+
+    comparison_items = []
+    for key, effect in INTERVENTION_EFFECTS.items():
+        sim = simulate_road_intervention(road_id, key, db)
+        comparison_items.append({
+            "key": key,
+            "name": effect["name"],
+            "type": effect["type"],
+            "projected_risk": sim["projected_risk"],
+            "change_points": sim["change_points"],
+            "reduction_percent": sim["reduction_percent"],
+        })
+
+    return {
+        "road_id": road_id,
+        "road_name": current_eval["road_name"],
+        "current_risk": current_risk,
+        "data_source": current_eval["data_source"],
+        "interventions": comparison_items,
+    }

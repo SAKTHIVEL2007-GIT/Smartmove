@@ -672,3 +672,67 @@ export interface PotholeVideoAnalysisResult {
   timestamp?: string
   disclaimer?: string
 }
+
+// ── Risk Engine & What-If Municipal Simulator (Part 1 & 2) ───────────────────
+
+export interface RiskFactorItem {
+  label: string
+  normalized_value: number
+  weight: number
+  max_points: number
+  contribution_points: number
+  status: string
+}
+
+export interface RiskEvaluationResult {
+  mode: string
+  data_source: string
+  road_id: number
+  road_name: string
+  risk_score: number
+  observed_conflicts: number
+  observation_note: string
+  factors: Record<string, RiskFactorItem>
+}
+
+export interface FactorTransition {
+  factor_key: string
+  before_normalized: number
+  after_normalized: number
+  delta: number
+  is_modified: boolean
+}
+
+export interface InterventionSimulationResult {
+  mode: string
+  data_source: string
+  road_id: number
+  road_name: string
+  intervention_key: string
+  intervention_name: string
+  intervention_type: string
+  current_risk: number
+  projected_risk: number
+  change_points: number
+  reduction_percent: number
+  factor_transitions: Record<string, FactorTransition>
+  projected_factors_breakdown: Record<string, RiskFactorItem>
+  disclaimer: string
+}
+
+export interface InterventionComparisonItem {
+  key: string
+  name: string
+  type: string
+  projected_risk: number
+  change_points: number
+  reduction_percent: number
+}
+
+export interface InterventionComparisonResult {
+  road_id: number
+  road_name: string
+  current_risk: number
+  data_source: string
+  interventions: InterventionComparisonItem[]
+}

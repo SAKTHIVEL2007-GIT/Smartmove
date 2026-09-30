@@ -13,7 +13,7 @@ from backend.schemas import (
     ContributingFactorDetail, HazardOut, ConflictEventOut,
     EvidenceFileOut, RepairOut, RiskSnapshotOut
 )
-from backend.services.risk_engine import risk_engine
+from backend.services.risk_engine import evaluate_road_risk
 from backend.services.data_quality_service import data_quality_service
 
 router = APIRouter(prefix="/road-intelligence", tags=["Road Intelligence"])
@@ -27,7 +27,8 @@ def list_road_segments(db: Session = Depends(get_db)):
     roads = db.query(Road).all()
     # Refresh risk scores via RiskEngine
     for r in roads:
-        risk_engine.evaluate_road(r, db)
+        res = evaluate_road_risk(r.id, db)
+        r.risk_score = res["risk_score"]
     return roads
 
 
@@ -35,9 +36,8 @@ def list_road_segments(db: Session = Depends(get_db)):
 def get_road_segment_dossier(segment_id: int, db: Session = Depends(get_db)):
     """
     Returns a full decision-support dossier for a specific road segment:
-    - Calculated risk (0.30H + 0.20E + 0.20C + 0.15V + 0.10P + 0.05U)
+    - Calculated risk score and transparent breakdown
     - Data quality & coverage (No data != safe)
-    - Contributing factors decomposition
     - Active defects, conflicts, and repairs
     - Longitudinal evidence timeline
     """
@@ -45,7 +45,7 @@ def get_road_segment_dossier(segment_id: int, db: Session = Depends(get_db)):
     if not road:
         raise HTTPException(status_code=404, detail=f"Road segment #{segment_id} not found.")
 
-    eval_result = risk_engine.evaluate_road(road, db)
+    eval_result = evaluate_road_risk(road.id, db)
     quality_result = data_quality_service.evaluate_road_data_quality(road, db)
 
     hazards = db.query(Hazard).filter(Hazard.road_id == road.id).order_by(Hazard.detected_at.desc()).all()
@@ -55,23 +55,23 @@ def get_road_segment_dossier(segment_id: int, db: Session = Depends(get_db)):
     snapshots = db.query(RiskSnapshot).filter(RiskSnapshot.road_id == road.id).order_by(RiskSnapshot.timestamp.asc()).all()
 
     # Formulate suggested intervention based on highest risk driver
-    factors = eval_result["factors"]
-    if factors["H"] >= 75.0:
+    factors = eval_result["raw_factors"]
+    if factors["hazard_severity"] >= 0.75:
         suggested = "Milling & High-Friction Asphalt Infill (Severe surface fatigue identified)"
-    elif factors["C"] >= 70.0 and factors["V"] >= 70.0:
+    elif factors["near_miss_risk"] >= 0.60 and factors["vulnerable_users"] >= 0.60:
         suggested = "Raised Pedestrian Crossing, Speed Table & Dynamic LED Warning Beacons"
-    elif factors["E"] >= 80.0:
+    elif factors["traffic_exposure"] >= 0.75:
         suggested = "Automated Adaptive Signal Timing & Dedicated Turning Bays"
     else:
         suggested = "Preventative Seal-Coating & Regular LiDAR Defect Monitoring"
 
     # Format contributing factors
     cf_dict = {}
-    for k, v in eval_result["contributing_factors"].items():
+    for k, v in eval_result["factors"].items():
         cf_dict[k] = ContributingFactorDetail(
-            score=v["score"],
+            score=v["normalized_value"] * 100.0,
             weight=v["weight"],
-            weighted_contribution=v["weighted_contribution"],
+            weighted_contribution=v["contribution_points"],
             label=v["label"]
         )
 

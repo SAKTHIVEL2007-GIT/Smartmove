@@ -695,3 +695,73 @@ class SmartJunctionDisplayStateOut(BaseModel):
     risk_score: float
     active_near_misses_count: int
     recent_conflict: Optional[TrafficConflictDetailOut] = None
+
+
+# ── Risk Engine & What-If Municipal Simulator (Part 1 & 2) ───────────────────
+
+class RiskFactorItemOut(BaseModel):
+    label: str
+    normalized_value: float
+    weight: float
+    max_points: float
+    contribution_points: float
+    status: str
+
+
+class RiskEvaluationOut(BaseModel):
+    mode: str = "current"
+    data_source: str
+    road_id: int
+    road_name: str
+    risk_score: float
+    observed_conflicts: int = 0
+    observation_note: str = ""
+    factors: Dict[str, RiskFactorItemOut]
+
+
+class FactorTransitionOut(BaseModel):
+    factor_key: str
+    before_normalized: float
+    after_normalized: float
+    delta: float
+    is_modified: bool
+
+
+class InterventionSimulationRequest(BaseModel):
+    road_id: int
+    intervention: str = "speed_bump"
+
+
+class InterventionSimulationOut(BaseModel):
+    mode: str = "simulation"
+    data_source: str = "WHAT-IF SIMULATION"
+    road_id: int
+    road_name: str
+    intervention_key: str
+    intervention_name: str
+    intervention_type: str
+    current_risk: float
+    projected_risk: float
+    change_points: float
+    reduction_percent: float
+    factor_transitions: Dict[str, FactorTransitionOut]
+    projected_factors_breakdown: Dict[str, RiskFactorItemOut]
+    disclaimer: str
+
+
+class InterventionComparisonItemOut(BaseModel):
+    key: str
+    name: str
+    type: str
+    projected_risk: float
+    change_points: float
+    reduction_percent: float
+
+
+class InterventionComparisonOut(BaseModel):
+    road_id: int
+    road_name: str
+    current_risk: float
+    data_source: str
+    interventions: List[InterventionComparisonItemOut]
+
