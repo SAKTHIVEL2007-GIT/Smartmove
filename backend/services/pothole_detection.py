@@ -208,6 +208,171 @@ class PotholeDetectionService:
             self._initialize_model()
         return self.is_custom_model_loaded and self.model is not None
 
+    def detect_frame(
+        self,
+        frame: np.ndarray,
+        conf_threshold: float = 0.25,
+        imgsz: int = 1280,
+        enable_tiling: bool = False,
+        road_type: Optional[str] = None,
+        traffic_exposure: Optional[str] = None,
+    ) -> List[PotholeDetectionItem]:
+        """
+        Unified Pothole Detector Inference Engine (Step 4 & Step 8).
+        Runs YOLOv8 model directly on NumPy BGR frame.
+        Supports:
+        - Dynamic class resolution (checks model.names for pothole class index)
+        - Configurable imgsz resolution (Step 7)
+        - Optional Tiled Inference (Step 8)
+        - Road Region Prioritization (Step 9)
+        - NMS IoU filtering (Step 11)
+        """
+        if frame is None or frame.size == 0:
+            return []
+
+        h, w = frame.shape[:2]
+        img_area = float(h * w)
+        detections: List[PotholeDetectionItem] = []
+
+        if not self.is_configured() or self.model is None:
+            return self._detect_optical_surface_anomalies(frame, img_area, road_type, traffic_exposure)
+
+        # Identify target pothole class ID dynamically (Step 2)
+        pothole_cls_id = None
+        for cid, cname in self.model.names.items():
+            if str(cname).lower() in ["0", "pothole", "defect", "crater"]:
+                pothole_cls_id = cid
+                break
+        if pothole_cls_id is None:
+            pothole_cls_id = list(self.model.names.keys())[0]
+
+        # 1. Full-frame inference
+        try:
+            results = self.model(frame, conf=conf_threshold, imgsz=imgsz, verbose=False)
+            for r in results:
+                if not hasattr(r, 'boxes') or r.boxes is None:
+                    continue
+                for box in r.boxes:
+                    cls_id = int(box.cls[0])
+                    # Match target pothole class or default single class
+                    if cls_id == pothole_cls_id or len(self.model.names) == 1:
+                        xyxy = box.xyxy[0].tolist()
+                        conf = float(box.conf[0])
+                        bx1, by1, bx2, by2 = xyxy
+                        bw = bx2 - bx1
+                        bh = by2 - by1
+                        box_area = bw * bh
+
+                        # Road Region Prioritization (Step 9): 1.1x confidence boost if in lower 65% of road
+                        box_cy = (by1 + by2) / 2.0
+                        if box_cy > h * 0.35:
+                            conf = min(conf * 1.1, 0.99)
+
+                        v_sev = self._classify_visual_severity(box_area, img_area, conf)
+                        c_sev = self._classify_contextual_severity(v_sev, road_type, traffic_exposure)
+                        risk = self.calculate_risk_score(v_sev, c_sev, conf)
+
+                        det = PotholeDetectionItem(
+                            box=BoundingBox(x1=bx1, y1=by1, x2=bx2, y2=by2, width=bw, height=bh),
+                            confidence=conf,
+                            class_name=str(self.model.names.get(cls_id, "pothole")),
+                            severity=v_sev,
+                            risk_score=risk,
+                            is_demo=False,
+                        )
+                        detections.append(det)
+        except Exception as e:
+            print(f"[AI Vision] YOLO detect_frame error: {e}")
+
+        # 2. Optional Tiled Inference for high-res frames with small/distant potholes (Step 8)
+        if enable_tiling and (w >= 1280 or h >= 720):
+            try:
+                half_w, half_h = w // 2, h // 2
+                overlap_w, overlap_h = int(w * 0.1), int(h * 0.1)
+
+                tiles = [
+                    (0, 0, half_w + overlap_w, half_h + overlap_h),
+                    (half_w - overlap_w, 0, w, half_h + overlap_h),
+                    (0, half_h - overlap_h, half_w + overlap_w, h),
+                    (half_w - overlap_w, half_h - overlap_h, w, h),
+                ]
+
+                tile_dets = []
+                for tx1, ty1, tx2, ty2 in tiles:
+                    tile_crop = frame[ty1:ty2, tx1:tx2]
+                    tile_results = self.model(tile_crop, conf=conf_threshold, imgsz=640, verbose=False)
+                    for r in tile_results:
+                        if not hasattr(r, 'boxes') or r.boxes is None:
+                            continue
+                        for box in r.boxes:
+                            cls_id = int(box.cls[0])
+                            if cls_id == pothole_cls_id or len(self.model.names) == 1:
+                                t_xyxy = box.xyxy[0].tolist()
+                                conf = float(box.conf[0])
+                                bx1 = t_xyxy[0] + tx1
+                                by1 = t_xyxy[1] + ty1
+                                bx2 = t_xyxy[2] + tx1
+                                by2 = t_xyxy[3] + ty1
+                                bw, bh = bx2 - bx1, by2 - by1
+                                box_area = bw * bh
+
+                                v_sev = self._classify_visual_severity(box_area, img_area, conf)
+                                c_sev = self._classify_contextual_severity(v_sev, road_type, traffic_exposure)
+                                risk = self.calculate_risk_score(v_sev, c_sev, conf)
+
+                                tile_dets.append(
+                                    PotholeDetectionItem(
+                                        box=BoundingBox(x1=bx1, y1=by1, x2=bx2, y2=by2, width=bw, height=bh),
+                                        confidence=conf,
+                                        class_name="pothole",
+                                        severity=v_sev,
+                                        risk_score=risk,
+                                        is_demo=False,
+                                    )
+                                )
+
+                # Merge full-frame and tile detections using Non-Maximum Suppression (Step 11)
+                all_dets = detections + tile_dets
+                detections = self._apply_nms(all_dets, iou_thresh=0.45)
+            except Exception as e:
+                print(f"[AI Vision] Tiled inference error: {e}")
+
+        # If zero neural detections, fallback to optical surface anomaly scanner
+        if len(detections) == 0:
+            optical_dets = self._detect_optical_surface_anomalies(frame, img_area, road_type, traffic_exposure)
+            detections.extend(optical_dets)
+
+        return detections
+
+    def _apply_nms(self, detections: List[PotholeDetectionItem], iou_thresh: float = 0.45) -> List[PotholeDetectionItem]:
+        """Non-Maximum Suppression helper to remove overlapping redundant bounding boxes."""
+        if not detections:
+            return []
+        
+        sorted_dets = sorted(detections, key=lambda d: d.confidence, reverse=True)
+        keep = []
+
+        while sorted_dets:
+            current = sorted_dets.pop(0)
+            keep.append(current)
+            remaining = []
+            for other in sorted_dets:
+                b1, b2 = current.box, other.box
+                ix1 = max(b1.x1, b2.x1)
+                iy1 = max(b1.y1, b2.y1)
+                ix2 = min(b1.x2, b2.x2)
+                iy2 = min(b1.y2, b2.y2)
+                iw = max(0.0, ix2 - ix1)
+                ih = max(0.0, iy2 - iy1)
+                intersection = iw * ih
+                union = (b1.width * b1.height) + (b2.width * b2.height) - intersection
+                iou = intersection / max(union, 1e-6)
+                if iou < iou_thresh:
+                    remaining.append(other)
+            sorted_dets = remaining
+
+        return keep
+
     def _detect_optical_surface_anomalies(
         self, img: np.ndarray, img_area: float, road_type: Optional[str] = None, traffic_exposure: Optional[str] = None
     ) -> List[PotholeDetectionItem]:

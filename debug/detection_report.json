@@ -1,0 +1,40 @@
+{
+  "video_path": "debug\\synthetic_road.mp4",
+  "total_frames": 75,
+  "frames_analyzed": 37,
+  "frames_containing_pothole": 37,
+  "total_raw_detections": 95,
+  "unique_potholes": 3,
+  "maximum_confidence": 0.78,
+  "processing_time_sec": 31.57,
+  "output_video_path": "debug\\test_output.mp4",
+  "unique_tracks": [
+    {
+      "track_id": "pothole_001",
+      "first_seen_frame": 2,
+      "last_seen_frame": 74,
+      "total_confirmations": 36,
+      "max_confidence": 0.74,
+      "severity": "MEDIUM",
+      "best_timestamp_seconds": 0.08
+    },
+    {
+      "track_id": "pothole_002",
+      "first_seen_frame": 2,
+      "last_seen_frame": 74,
+      "total_confirmations": 36,
+      "max_confidence": 0.74,
+      "severity": "MEDIUM",
+      "best_timestamp_seconds": 0.08
+    },
+    {
+      "track_id": "pothole_003",
+      "first_seen_frame": 16,
+      "last_seen_frame": 60,
+      "total_confirmations": 23,
+      "max_confidence": 0.78,
+      "severity": "HIGH",
+      "best_timestamp_seconds": 0.64
+    }
+  ]
+}
