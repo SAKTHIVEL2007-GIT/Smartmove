@@ -497,6 +497,73 @@ export interface WaterAnalysisResult {
   timestamp?: string
 }
 
+// ── Unified Road Analysis Interface ─────────────────────────────────────────
+
+export interface UnifiedPotholeItem {
+  box: BoundingBox
+  confidence: number
+  severity: string
+  risk_score: number
+  is_water_filled: boolean
+  water_overlap_percent: number
+}
+
+export interface UnifiedPotholesSummary {
+  count: number
+  highest_severity: string
+  confidence: number
+  water_filled_count: number
+  detections: UnifiedPotholeItem[]
+}
+
+export interface UnifiedWaterSummary {
+  status: string
+  is_available: boolean
+  detected: boolean
+  confidence: number
+  coverage_percent: number
+  water_pixel_count: number
+  road_pixel_count: number
+  severity: string
+  depth_label: string
+  water_filled_potholes?: boolean
+  regions: WaterRegionItem[]
+  mask_url: string
+  overlay_url?: string
+}
+
+export interface UnifiedRoadCondition {
+  classification: string
+  road_name: string
+  road_type: string
+}
+
+export interface UnifiedRiskSummary {
+  score: number
+  factors: Record<string, any>
+}
+
+export interface UnifiedRoadAnalysisResult {
+  analysis_id: string
+  image: {
+    width: number
+    height: number
+    filename: string
+  }
+  potholes: UnifiedPotholesSummary
+  water: UnifiedWaterSummary
+  road_condition: UnifiedRoadCondition
+  risk: UnifiedRiskSummary
+  processed_image_url: string
+  overlay_url?: string
+  metadata: {
+    source: string
+    inference_device: string
+    timestamp: string
+    models: Record<string, string>
+  }
+}
+
 // ── Road Safety Intelligence Layer Types ─────────────────────────────────────
 
 export interface SafeCityFactors {

@@ -825,3 +825,65 @@ class InterventionComparisonOut(BaseModel):
     data_source: str
     interventions: List[InterventionComparisonItemOut]
 
+
+# ── Unified AI Road Analysis Schemas ──────────────────────────────────────────
+
+class UnifiedImageMetaOut(BaseModel):
+    width: int
+    height: int
+    filename: str
+
+
+class UnifiedPotholeDetectionItemOut(BaseModel):
+    box: WaterRegionBoxOut
+    confidence: float
+    severity: str
+    risk_score: float
+    is_water_filled: bool = False
+    water_overlap_percent: float = 0.0
+
+
+class UnifiedPotholesSummaryOut(BaseModel):
+    count: int
+    highest_severity: str
+    confidence: float
+    water_filled_count: int = 0
+    detections: List[UnifiedPotholeDetectionItemOut] = []
+
+
+class UnifiedWaterSummaryOut(BaseModel):
+    status: str
+    is_available: bool
+    detected: bool
+    confidence: float
+    coverage_percent: float
+    water_pixel_count: int = 0
+    road_pixel_count: int = 0
+    severity: str
+    depth_label: str = "Depth: Not estimated from RGB image"
+    regions: List[WaterRegionItemOut] = []
+    mask_url: Optional[str] = ""
+
+
+class UnifiedRoadConditionOut(BaseModel):
+    classification: str
+    road_name: str
+    road_type: str
+
+
+class UnifiedRiskSummaryOut(BaseModel):
+    score: float
+    factors: Dict[str, Any] = {}
+
+
+class UnifiedRoadAnalysisOut(BaseModel):
+    analysis_id: str
+    image: UnifiedImageMetaOut
+    potholes: UnifiedPotholesSummaryOut
+    water: UnifiedWaterSummaryOut
+    road_condition: UnifiedRoadConditionOut
+    risk: UnifiedRiskSummaryOut
+    processed_image_url: str
+    metadata: Dict[str, Any] = {}
+
+

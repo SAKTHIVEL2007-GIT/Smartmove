@@ -6,10 +6,10 @@ import RiskBadge from '@/components/ui/RiskBadge'
 import StatusBadge from '@/components/ui/StatusBadge'
 import {
   useRoads, useJunctions, useAIModelStatus,
-  useAnalyzePothole, useAnalyzePotholeVideo, useAnalyzeWater, useAnalyzeTraffic, useAIEvents,
+  useAnalyzePothole, useAnalyzePotholeVideo, useAnalyzeWater, useAnalyzeRoadCondition, useAnalyzeTraffic, useAIEvents,
   useDemoTrafficVideo, useReviewConflict
 } from '@/hooks/useApi'
-import type { PotholeAnalysisResult, PotholeVideoAnalysisResult, UniquePotholeTrack, WaterAnalysisResult, TrafficAnalysisResult, TrafficConflictDetail } from '@/types'
+import type { PotholeAnalysisResult, PotholeVideoAnalysisResult, UniquePotholeTrack, WaterAnalysisResult, UnifiedRoadAnalysisResult, TrafficAnalysisResult, TrafficConflictDetail } from '@/types'
 
 export default function AIVision() {
   const [activeTab, setActiveTab] = useState<'potholes' | 'pothole-video' | 'water' | 'traffic'>('potholes')
@@ -21,6 +21,55 @@ export default function AIVision() {
   const { data: aiEvents = [] } = useAIEvents()
   const { data: demoVideoMeta } = useDemoTrafficVideo()
   const { mutate: reviewConflict, isPending: isReviewingConflict } = useReviewConflict()
+
+  // ── Unified Road Condition Analysis State ────────────────────────────────
+  const [unifiedFile, setUnifiedFile] = useState<File | null>(null)
+  const [unifiedPreview, setUnifiedPreview] = useState<string | null>(null)
+  const [selectedUnifiedRoadId, setSelectedUnifiedRoadId] = useState<number | undefined>(undefined)
+  const [unifiedResult, setUnifiedResult] = useState<UnifiedRoadAnalysisResult | null>(null)
+  const [unifiedError, setUnifiedError] = useState<string | null>(null)
+  const [isDraggingUnified, setIsDraggingUnified] = useState<boolean>(false)
+  const [unifiedViewMode, setUnifiedViewMode] = useState<'side-by-side' | 'single'>('side-by-side')
+
+  const unifiedInputRef = useRef<HTMLInputElement>(null)
+  const { mutate: runUnifiedRoadAnalysis, isPending: isAnalyzingUnified } = useAnalyzeRoadCondition()
+
+  const processUnifiedFile = (file: File, autoRun = true) => {
+    setUnifiedError(null)
+    if (!file.type.startsWith('image/') && !file.name.match(/\.(jpg|jpeg|png|webp)$/i)) {
+      setUnifiedError('Please upload a valid image file (JPG, PNG, WEBP).')
+      return
+    }
+    if (file.size > 15 * 1024 * 1024) {
+      setUnifiedError('File size exceeds 15MB limit.')
+      return
+    }
+
+    setUnifiedFile(file)
+    setUnifiedPreview(URL.createObjectURL(file))
+    setUnifiedResult(null)
+
+    if (autoRun) {
+      runUnifiedRoadAnalysis(
+        {
+          file,
+          road_id: selectedUnifiedRoadId,
+        },
+        {
+          onSuccess: (data) => setUnifiedResult(data),
+          onError: (err: any) => setUnifiedError(err.response?.data?.detail || err.message || 'Unified road analysis failed.'),
+        }
+      )
+    }
+  }
+
+  const handleUnifiedDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDraggingUnified(false)
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      processUnifiedFile(e.dataTransfer.files[0])
+    }
+  }
 
   // ── Water Accumulation State ──────────────────────────────────────────────
   const [waterFile, setWaterFile] = useState<File | null>(null)
@@ -307,7 +356,13 @@ export default function AIVision() {
       if (!blob) return
       const file = new File([blob], `road_cam_${Date.now()}.jpg`, { type: 'image/jpeg' })
       stopCamera()
-      processPotholeFile(file, true)
+      if (activeTab === 'potholes') {
+        processUnifiedFile(file, true)
+      } else if (activeTab === 'water') {
+        processWaterFile(file, true)
+      } else {
+        processPotholeFile(file, true)
+      }
     }, 'image/jpeg', 0.92)
   }
 
@@ -536,12 +591,12 @@ export default function AIVision() {
           <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-navy-800 border border-gray-800 text-xs">
             <span
               className={`w-2 h-2 rounded-full ${
-                modelStatus?.water_model_loaded ? 'bg-emerald-400 animate-pulse' : 'bg-cyan-400 animate-pulse'
+                modelStatus?.water_model_loaded ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'
               }`}
             />
             <span className="text-gray-400">Water AI:</span>
             <span className="text-white font-mono font-bold text-[11px]">
-              {modelStatus?.water_model_loaded ? 'YOLOv8-Seg Active' : 'Optical Segmenter'}
+              {modelStatus?.water_model_loaded ? 'YOLOv8-Seg Loaded' : 'YOLOv8-Seg ⚠ Model unavailable'}
             </span>
           </div>
 
@@ -569,7 +624,7 @@ export default function AIVision() {
               : 'text-gray-500 hover:text-gray-300'
           }`}
         >
-          ⬟ Road Image Analysis (Potholes)
+          ⬟ AI Road Condition Analysis
         </button>
         <button
           onClick={() => setActiveTab('pothole-video')}
@@ -604,63 +659,72 @@ export default function AIVision() {
       </div>
 
       {/* ────────────────────────────────────────────────────────────────────────
-          TAB 1: ROAD IMAGE ANALYSIS (POTHOLE DETECTION)
+          TAB 1: UNIFIED AI ROAD CONDITION ANALYSIS
          ──────────────────────────────────────────────────────────────────────── */}
       {activeTab === 'potholes' && (
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
           {/* Left Column: Upload & Triggers */}
           <div className="xl:col-span-1 space-y-4">
             <div className="card">
-              <div className="card-header">Road Image Input</div>
+              <div className="card-header flex items-center justify-between">
+                <span>AI Road Condition Analysis</span>
+                <span className="text-[10px] bg-accent/20 text-accent border border-accent/30 px-2 py-0.5 rounded font-mono font-bold">
+                  UNIFIED HAZARD SCAN
+                </span>
+              </div>
+              <p className="text-xs text-gray-400 mb-3">
+                Upload any road image. The AI automatically checks for potholes, standing water, surface distress, and water-filled cavities in a single execution pipeline.
+              </p>
 
               {/* Drag & Drop Area */}
               <div
-                onClick={() => potholeInputRef.current?.click()}
+                onClick={() => unifiedInputRef.current?.click()}
                 onDragOver={(e) => {
                   e.preventDefault()
                   e.stopPropagation()
-                  setIsDraggingPothole(true)
+                  setIsDraggingUnified(true)
                 }}
                 onDragLeave={(e) => {
                   e.preventDefault()
                   e.stopPropagation()
-                  setIsDraggingPothole(false)
+                  setIsDraggingUnified(false)
                 }}
-                onDrop={(e) => {
-                  e.preventDefault()
-                  e.stopPropagation()
-                  setIsDraggingPothole(false)
-                  const droppedFile = e.dataTransfer.files?.[0]
-                  if (droppedFile) {
-                    processPotholeFile(droppedFile, true)
-                  }
-                }}
+                onDrop={handleUnifiedDrop}
                 className={`border-2 border-dashed rounded-lg p-5 text-center cursor-pointer transition-all duration-150 ${
-                  isDraggingPothole
+                  isDraggingUnified
                     ? 'border-accent bg-accent/20 scale-[1.02] shadow-lg shadow-accent/20'
                     : 'border-gray-700 hover:border-accent/60 bg-navy-900/60'
                 }`}
               >
                 <input
-                  ref={potholeInputRef}
+                  ref={unifiedInputRef}
                   type="file"
                   accept="image/jpeg,image/png,image/webp"
                   className="hidden"
-                  onChange={handlePotholeFileChange}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0]
+                    if (f) processUnifiedFile(f, true)
+                    e.target.value = ''
+                  }}
                 />
-                <div className="text-3xl mb-1.5">{isDraggingPothole ? '📥' : '📸'}</div>
+                <div className="text-3xl mb-1.5">{isDraggingUnified ? '📥' : '📸'}</div>
                 <div className="text-white text-sm font-semibold">
-                  {isDraggingPothole ? 'Drop Image Here to Analyze' : 'Click or Drag & Drop Road Image'}
+                  {isDraggingUnified ? 'Drop Road Image Here' : 'Click or Drag & Drop Any Road Image'}
                 </div>
-                <div className="text-gray-400 text-xs mt-0.5">Auto-runs YOLOv8 inspection (JPG, PNG, WEBP &lt; 15MB)</div>
-                {potholeFile && (
-                  <div className="mt-2.5 text-xs bg-accent/15 text-accent-light px-2.5 py-1 rounded inline-block font-mono border border-accent/30 font-semibold">
-                    {potholeFile.name} ({(potholeFile.size / 1024).toFixed(0)} KB)
+                <div className="text-gray-400 text-xs mt-0.5">JPG • PNG • WEBP (&lt; 15MB)</div>
+                <div className="mt-2.5 flex items-center justify-center gap-2 text-[10px] text-gray-400 font-mono">
+                  <span>✓ Potholes</span>
+                  <span>✓ Water Accumulation</span>
+                  <span>✓ Surface Defects</span>
+                </div>
+                {unifiedFile && (
+                  <div className="mt-2 text-xs bg-accent/15 text-accent-light px-2.5 py-1 rounded inline-block font-mono border border-accent/30 font-semibold">
+                    {unifiedFile.name} ({(unifiedFile.size / 1024).toFixed(0)} KB)
                   </div>
                 )}
               </div>
 
-              {/* Action Triggers: Camera + Precomputed Demonstration */}
+              {/* Live Camera Button & Samples */}
               <div className="mt-3 space-y-2">
                 <button
                   type="button"
@@ -670,33 +734,51 @@ export default function AIVision() {
                   <span>📷</span> Capture from Live Camera
                 </button>
 
-                <div className="text-[11px] font-semibold text-gray-400 pt-1">ONE-CLICK TEST SAMPLES:</div>
+                <div className="text-[11px] font-semibold text-gray-400 pt-1">TEST SAMPLES:</div>
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
-                    onClick={loadPrecomputedDemoSample}
-                    disabled={isAnalyzingPothole}
-                    className="text-xs bg-amber-500/10 hover:bg-amber-500/25 text-amber-300 py-2 px-2.5 rounded border border-amber-500/40 text-center transition-colors font-semibold flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
+                    onClick={async () => {
+                      try {
+                        const res = await fetch('/uploads/samples/sample_pothole_road.jpg')
+                        if (res.ok) {
+                          const blob = await res.blob()
+                          const f = new File([blob], 'sample_pothole_road.jpg', { type: 'image/jpeg' })
+                          processUnifiedFile(f, true)
+                        }
+                      } catch (e) {}
+                    }}
+                    disabled={isAnalyzingUnified}
+                    className="text-xs bg-amber-500/10 hover:bg-amber-500/25 text-amber-300 py-2 px-2 rounded border border-amber-500/40 text-center transition-colors font-semibold flex items-center justify-center gap-1.5 disabled:opacity-50"
                   >
-                    <span>★</span> Damaged Road (Potholes)
+                    <span>★</span> Potholes Sample
                   </button>
                   <button
                     type="button"
-                    onClick={() => loadSamplePotholeImage('clean')}
-                    disabled={isAnalyzingPothole}
-                    className="text-xs bg-emerald-500/10 hover:bg-emerald-500/25 text-emerald-300 py-2 px-2.5 rounded border border-emerald-500/40 text-center transition-colors font-semibold flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
+                    onClick={async () => {
+                      try {
+                        const res = await fetch('/uploads/samples/sample_water_road.jpg')
+                        if (res.ok) {
+                          const blob = await res.blob()
+                          const f = new File([blob], 'sample_water_road.jpg', { type: 'image/jpeg' })
+                          processUnifiedFile(f, true)
+                        }
+                      } catch (e) {}
+                    }}
+                    disabled={isAnalyzingUnified}
+                    className="text-xs bg-cyan-500/10 hover:bg-cyan-500/25 text-cyan-300 py-2 px-2 rounded border border-cyan-500/40 text-center transition-colors font-semibold flex items-center justify-center gap-1.5 disabled:opacity-50"
                   >
-                    <span>✓</span> Clean Highway (0 Defects)
+                    <span>💧</span> Water Puddle Sample
                   </button>
                 </div>
               </div>
 
-              {/* Corridor Selection */}
+              {/* Road Corridor Selection */}
               <div className="mt-4">
                 <label className="text-xs text-gray-400 block mb-1">Target Road Corridor:</label>
                 <select
-                  value={selectedRoadId || ''}
-                  onChange={(e) => setSelectedRoadId(e.target.value ? Number(e.target.value) : undefined)}
+                  value={selectedUnifiedRoadId || ''}
+                  onChange={(e) => setSelectedUnifiedRoadId(e.target.value ? Number(e.target.value) : undefined)}
                   className="w-full bg-navy-900 border border-gray-700 rounded px-3 py-2 text-xs text-white focus:outline-none focus:border-accent"
                 >
                   <option value="">Auto-detect GPS or select corridor...</option>
@@ -709,213 +791,212 @@ export default function AIVision() {
               </div>
 
               <button
-                onClick={handlePotholeSubmit}
-                disabled={!potholeFile || isAnalyzingPothole}
+                onClick={() => {
+                  if (unifiedFile) processUnifiedFile(unifiedFile, true)
+                }}
+                disabled={!unifiedFile || isAnalyzingUnified}
                 className="btn-primary w-full mt-4 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isAnalyzingPothole ? (
+                {isAnalyzingUnified ? (
                   <>
                     <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    Executing YOLOv8 Inference Pipeline...
+                    Running AI Road Analysis...
                   </>
                 ) : (
-                  'Run Road Image Analysis'
+                  '⚡ RUN AI ROAD ANALYSIS'
                 )}
               </button>
 
-              {potholeError && (
+              {unifiedError && (
                 <div className="mt-3 text-xs bg-red-500/10 border border-red-500/30 text-red-400 p-2.5 rounded">
-                  ✕ {potholeError}
+                  ✕ {unifiedError}
                 </div>
               )}
             </div>
 
-            {/* Architecture Card */}
-            <div className="card text-xs space-y-2 border-gray-800">
-              <div className="card-header mb-1">AI Inference Pipeline</div>
-              <div className="flex justify-between py-1 border-b border-gray-800/60">
-                <span className="text-gray-500">Pipeline Stages</span>
-                <span className="text-white font-mono text-[10px]">IMAGE → YOLOv8 → SEVERITY → RISK</span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-gray-800/60">
-                <span className="text-gray-500">Model Runtime</span>
-                <span className="text-white font-mono">Ultralytics YOLOv8</span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-gray-800/60">
-                <span className="text-gray-500">Inference Location</span>
-                <span className="text-emerald-400 font-mono">100% Local (On-Device)</span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-gray-800/60">
-                <span className="text-gray-500">Configured Weights</span>
-                <span className="text-accent font-mono truncate max-w-[160px]">
-                  {modelStatus?.pothole_model_path || 'models/pothole_yolov8.pt'}
+            {/* Truthful AI Engine Status Panel */}
+            <div className="card text-xs space-y-2.5 border-gray-800">
+              <div className="card-header mb-1">AI ENGINE STATUS</div>
+
+              <div className="flex items-center justify-between py-1 border-b border-gray-800/60">
+                <span className="text-gray-400">Pothole Detection</span>
+                <span
+                  className={`font-mono font-bold text-[11px] px-2 py-0.5 rounded border ${
+                    modelStatus?.pothole_model_loaded
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                      : 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                  }`}
+                >
+                  YOLOv8 • {modelStatus?.pothole_model_loaded ? 'Loaded' : 'Unconfigured'}
                 </span>
               </div>
 
-              <div className="pt-2">
-                <div className="text-[11px] font-semibold text-gray-400 mb-1">RISK SYNTHESIS ENGINE:</div>
-                <div className="p-2 bg-navy-900 rounded font-mono text-[10px] text-accent leading-relaxed">
-                  Risk = 0.6 × Contextual + 0.3 × Visual + 0.1 × Confidence
-                </div>
+              <div className="flex items-center justify-between py-1 border-b border-gray-800/60">
+                <span className="text-gray-400">Water Segmentation</span>
+                <span
+                  className={`font-mono font-bold text-[11px] px-2 py-0.5 rounded border ${
+                    modelStatus?.water_model_loaded
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                      : 'bg-red-500/10 text-red-400 border-red-500/30'
+                  }`}
+                >
+                  YOLOv8-Seg • {modelStatus?.water_model_loaded ? 'Loaded' : '⚠ Model unavailable'}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between py-1">
+                <span className="text-gray-400">Traffic Detection</span>
+                <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-mono font-bold text-[11px] px-2 py-0.5 rounded">
+                  YOLOv8 + ByteTrack • Loaded
+                </span>
               </div>
             </div>
           </div>
 
-          {/* Right Column: Visualizer & Structured Results */}
+          {/* Right Column: Visualization & Structured Results */}
           <div className="xl:col-span-2 space-y-4">
-            {potholeResult ? (
+            {unifiedResult ? (
               <>
-                {/* Precomputed Demonstration Label Banner */}
-                {potholeResult.is_precomputed_demo && (
-                  <div className="bg-amber-500/10 border border-amber-500/40 rounded-xl p-3 flex items-center justify-between text-xs">
-                    <div className="flex items-center gap-2">
-                      <span className="text-amber-400 text-base">★</span>
-                      <div>
-                        <span className="text-amber-300 font-bold tracking-wide">[Precomputed Demonstration]</span>
-                        <p className="text-amber-200/80 text-[11px]">
-                          Displaying benchmark verified ground-truth pothole detection annotations on standard urban asphalt test frame.
-                        </p>
-                      </div>
+                {/* 4 Summary Cards */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {/* Potholes Card */}
+                  <div className="card p-3 space-y-1">
+                    <div className="text-[10px] text-gray-400 font-bold uppercase tracking-wider flex items-center justify-between">
+                      <span>Potholes</span>
+                      <span className="text-accent text-[10px]">YOLOv8</span>
                     </div>
-                    <span className="text-[10px] font-mono bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded border border-amber-500/40">
-                      BENCHMARK
-                    </span>
-                  </div>
-                )}
-
-                {/* Honest Unconfigured Model Banner */}
-                {potholeResult.is_demo_mode && !potholeResult.is_precomputed_demo && (
-                  <div className="bg-navy-900 border border-amber-500/40 rounded-xl p-3.5 text-xs space-y-2">
-                    <div className="flex items-center gap-2 text-amber-400 font-bold">
-                      <span>⚠</span> YOLO pothole model not configured.
+                    <div className="text-2xl font-black font-mono text-white">
+                      {unifiedResult.potholes.count} <span className="text-xs font-normal text-gray-400">detected</span>
                     </div>
-                    <p className="text-gray-300 text-[11px] leading-relaxed">
-                      Custom YOLO pothole weights were not found at{' '}
-                      <code className="bg-navy-950 px-1 py-0.5 rounded font-mono text-amber-300">
-                        {potholeResult.model_path || 'models/pothole_yolov8.pt'}
-                      </code>. No artificial bounding boxes were invented.
-                    </p>
-                    <div className="bg-navy-950 p-2.5 rounded border border-gray-800 text-[11px] text-gray-400 space-y-1">
-                      <div className="font-semibold text-gray-300">To enable custom YOLO pothole inference:</div>
-                      <div>1. Train or download a YOLOv8 pothole weights file (`best.pt`).</div>
-                      <div>2. Place it at `models/pothole_yolov8.pt` in the project root.</div>
-                      <div>3. Or click <strong>[Precomputed Demo]</strong> to explore the benchmark test sample.</div>
-                    </div>
-                  </div>
-                )}
-
-                {/* 3 Structured Result Cards */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  {/* Card 1: Detection Summary */}
-                  <div className="card p-3.5 space-y-2">
-                    <div className="text-[11px] text-gray-400 font-bold uppercase tracking-wider flex items-center justify-between">
-                      <span>1. Detection Summary</span>
-                      <span className="text-accent font-mono text-xs">{(potholeResult.processing_time_sec ?? 0.12).toFixed(2)}s</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 pt-1 border-t border-gray-800/60 text-xs">
-                      <div>
-                        <div className="text-gray-500 text-[10px]">Pothole Count</div>
-                        <div className="text-xl font-bold font-mono text-white mt-0.5">{potholeResult.pothole_count}</div>
-                      </div>
-                      <div>
-                        <div className="text-gray-500 text-[10px]">Avg Confidence</div>
-                        <div className="text-xl font-bold font-mono text-accent mt-0.5">
-                          {((potholeResult.average_confidence ?? potholeResult.confidence) * 100).toFixed(0)}%
-                        </div>
-                      </div>
-                    </div>
-                    <div className="pt-1 text-[11px] text-gray-400 flex justify-between items-center border-t border-gray-800/40">
-                      <span>Highest Severity:</span>
-                      <RiskBadge level={potholeResult.highest_severity || potholeResult.visual_severity || potholeResult.severity} />
+                    <div className="flex items-center justify-between pt-1 border-t border-gray-800 text-[11px]">
+                      <span className="text-gray-400">Severity:</span>
+                      <RiskBadge level={unifiedResult.potholes.highest_severity || 'LOW'} />
                     </div>
                   </div>
 
-                  {/* Card 2: Contextual Analysis */}
-                  <div className="card p-3.5 space-y-2">
-                    <div className="text-[11px] text-gray-400 font-bold uppercase tracking-wider">
-                      2. Contextual Analysis
+                  {/* Water Accumulation Card */}
+                  <div className="card p-3 space-y-1">
+                    <div className="text-[10px] text-gray-400 font-bold uppercase tracking-wider flex items-center justify-between">
+                      <span>Water Accumulation</span>
+                      <span className="text-cyan-400 text-[10px]">Segmentation</span>
                     </div>
-                    <div className="space-y-1.5 pt-1 border-t border-gray-800/60 text-xs">
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-400">Traffic Exposure:</span>
-                        <span className="font-mono text-white font-semibold">{potholeResult.traffic_exposure || 'HIGH'}</span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-400">Vulnerable Users:</span>
-                        <span className="font-mono text-amber-400 font-semibold">{potholeResult.vulnerable_users || 'HIGH'}</span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-400">Defect Persistence:</span>
-                        <span className="font-mono text-gray-300">{potholeResult.persistence || 'MEDIUM'}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Card 3: Calculated Risk */}
-                  <div className="card p-3.5 space-y-2">
-                    <div className="text-[11px] text-gray-400 font-bold uppercase tracking-wider flex items-center justify-between">
-                      <span>3. Calculated Risk</span>
-                      <span className="text-[10px] text-emerald-400 font-mono">CONF: {potholeResult.risk_confidence || 'HIGH'}</span>
-                    </div>
-                    <div className="flex items-baseline justify-between pt-1 border-t border-gray-800/60">
-                      <div className="text-2xl font-black font-mono text-red-400">
-                        {Math.round(potholeResult.risk_score)}<span className="text-xs text-gray-500 font-normal">/100</span>
-                      </div>
-                      <RiskBadge level={potholeResult.severity} />
-                    </div>
-                    <p className="text-[9px] text-gray-400 leading-tight border-t border-gray-800/40 pt-1">
-                      ⚠️ <em>Model confidence ≠ road danger.</em> Synthesizes traffic exposure and vulnerable road users.
-                    </p>
-                  </div>
-                </div>
-
-                {/* Evidence Chain-of-Custody & GPS Card */}
-                <div className="p-3 bg-navy-800 rounded-xl border border-gray-800 flex flex-wrap items-center justify-between gap-3 text-xs">
-                  <div className="flex items-center gap-2">
-                    <span className="text-gray-400">Evidence Record:</span>
-                    <span className="font-mono text-accent font-bold bg-navy-900 border border-gray-700 px-2 py-0.5 rounded">
-                      {potholeResult.evidence_id || 'SC-H-1042'}
-                    </span>
-                    <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/30 font-mono">
-                      ✓ CHAIN-OF-CUSTODY REGISTERED
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-3 font-mono text-[11px] text-gray-300">
-                    <span className="flex items-center gap-1">
-                      <span>📍</span>
-                      {potholeResult.latitude && potholeResult.longitude ? (
-                        `${potholeResult.latitude.toFixed(4)}, ${potholeResult.longitude.toFixed(4)}`
+                    <div className="text-2xl font-black font-mono text-cyan-300">
+                      {unifiedResult.water.status === 'model_unavailable' ? (
+                        <span className="text-amber-400 text-sm font-sans font-normal">Model unavailable</span>
                       ) : (
-                        <span className="text-gray-500 italic">Location unavailable</span>
+                        `${unifiedResult.water.coverage_percent.toFixed(1)}%`
                       )}
-                    </span>
-                    <span className="text-[9px] bg-navy-900 text-gray-400 border border-gray-700 px-1.5 py-0.5 rounded">
-                      {potholeResult.gps_source || 'Corridor Default'}
-                    </span>
-                    <span className="text-gray-500">|</span>
-                    <span className="text-gray-400">{potholeResult.timestamp || 'Recorded Just Now'}</span>
+                    </div>
+                    <div className="flex items-center justify-between pt-1 border-t border-gray-800 text-[11px]">
+                      <span className="text-gray-400">Severity:</span>
+                      {unifiedResult.water.status === 'model_unavailable' ? (
+                        <span className="text-[10px] text-amber-400 font-mono">Model N/A</span>
+                      ) : (
+                        <RiskBadge level={unifiedResult.water.severity} />
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Surface Condition Card */}
+                  <div className="card p-3 space-y-1">
+                    <div className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
+                      Road Condition
+                    </div>
+                    <div
+                      className={`text-xl font-black font-mono mt-0.5 ${
+                        unifiedResult.road_condition.classification === 'CRITICAL'
+                          ? 'text-red-400'
+                          : unifiedResult.road_condition.classification === 'POOR'
+                          ? 'text-amber-400'
+                          : unifiedResult.road_condition.classification === 'FAIR'
+                          ? 'text-yellow-300'
+                          : 'text-emerald-400'
+                      }`}
+                    >
+                      {unifiedResult.road_condition.classification}
+                    </div>
+                    <div className="pt-1 border-t border-gray-800 text-[10px] text-gray-400 truncate">
+                      {unifiedResult.water.water_filled_potholes ? '⚠️ Water-filled Potholes' : 'Defect Scanned'}
+                    </div>
+                  </div>
+
+                  {/* Monitored Road Risk Card */}
+                  <div className="card p-3 space-y-1">
+                    <div className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
+                      Monitored Road Risk
+                    </div>
+                    <div className="text-2xl font-black font-mono text-red-400">
+                      {Math.round(unifiedResult.risk.score)}
+                      <span className="text-xs text-gray-500 font-normal">/100</span>
+                    </div>
+                    <div className="pt-1 border-t border-gray-800 text-[10px] text-emerald-400 font-mono">
+                      SYNTHESIZED RISK
+                    </div>
                   </div>
                 </div>
 
-                {/* Side-by-Side Visual Inspection Viewport */}
+                {/* Transparent Risk Breakdown Panel */}
+                <div className="card p-3 text-xs space-y-2 border-gray-800 bg-navy-900/80">
+                  <div className="flex items-center justify-between border-b border-gray-800 pb-1 font-bold text-white">
+                    <span>ROAD RISK SCORE: {Math.round(unifiedResult.risk.score)}/100</span>
+                    <span className="text-[10px] font-mono text-accent">Transparent Factor Breakdown</span>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-[11px]">
+                    <div className="bg-navy-950 p-2 rounded border border-gray-800">
+                      <div className="text-gray-400 text-[10px]">Potholes</div>
+                      <div className="font-mono text-amber-300 font-bold">
+                        +{unifiedResult.risk.factors.pothole_severity || 0}
+                      </div>
+                    </div>
+                    <div className="bg-navy-950 p-2 rounded border border-gray-800">
+                      <div className="text-gray-400 text-[10px]">Water</div>
+                      <div className="font-mono text-cyan-300 font-bold">
+                        +{unifiedResult.risk.factors.water_accumulation || 0}
+                      </div>
+                    </div>
+                    <div className="bg-navy-950 p-2 rounded border border-gray-800">
+                      <div className="text-gray-400 text-[10px]">Traffic Exp</div>
+                      <div className="font-mono text-white font-bold">
+                        +{unifiedResult.risk.factors.traffic_exposure || 0}
+                      </div>
+                    </div>
+                    <div className="bg-navy-950 p-2 rounded border border-gray-800">
+                      <div className="text-gray-400 text-[10px]">Road Cond</div>
+                      <div className="font-mono text-white font-bold">
+                        +{unifiedResult.risk.factors.road_condition || 0}
+                      </div>
+                    </div>
+                    <div className="bg-navy-950 p-2 rounded border border-gray-800">
+                      <div className="text-gray-400 text-[10px]">Vulnerable Users</div>
+                      <div className="font-mono text-amber-400 font-bold">
+                        +{unifiedResult.risk.factors.vulnerable_users || 0}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Visual Inspection Viewport (Side-by-Side or Single) */}
                 <div className="card p-0 overflow-hidden">
                   <div className="px-4 py-2.5 bg-navy-800 border-b border-gray-800 flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <span className="card-header mb-0">Visual Inspection Viewport</span>
-                      {potholeResult.detections.length > 0 && (
-                        <span className="text-[11px] text-accent bg-accent/10 px-2 py-0.5 rounded font-mono border border-accent/20">
-                          {potholeResult.detections.length} Detection Box(es)
+                      <span className="card-header mb-0">AI Hazard Overlay Viewport</span>
+                      {unifiedResult.water.detected && (
+                        <span className="text-[10px] bg-cyan-500/20 text-cyan-300 px-2 py-0.5 rounded font-mono border border-cyan-500/30">
+                          💧 Water Mask Active
+                        </span>
+                      )}
+                      {unifiedResult.water.water_filled_potholes && (
+                        <span className="text-[10px] bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded font-mono border border-purple-500/30">
+                          ⚡ Water-filled Pothole Mask Overlap
                         </span>
                       )}
                     </div>
 
-                    {/* View Switcher: Side-by-Side vs Toggle */}
                     <div className="flex items-center gap-1 bg-navy-900 p-0.5 rounded border border-gray-700">
                       <button
-                        onClick={() => setPotholeViewMode('side-by-side')}
+                        onClick={() => setUnifiedViewMode('side-by-side')}
                         className={`text-xs px-2.5 py-1 rounded transition-colors ${
-                          potholeViewMode === 'side-by-side'
+                          unifiedViewMode === 'side-by-side'
                             ? 'bg-accent text-white font-semibold'
                             : 'text-gray-400 hover:text-white'
                         }`}
@@ -923,9 +1004,9 @@ export default function AIVision() {
                         Side-by-Side View
                       </button>
                       <button
-                        onClick={() => setPotholeViewMode('single')}
+                        onClick={() => setUnifiedViewMode('single')}
                         className={`text-xs px-2.5 py-1 rounded transition-colors ${
-                          potholeViewMode === 'single'
+                          unifiedViewMode === 'single'
                             ? 'bg-accent text-white font-semibold'
                             : 'text-gray-400 hover:text-white'
                         }`}
@@ -935,33 +1016,31 @@ export default function AIVision() {
                     </div>
                   </div>
 
-                  {potholeViewMode === 'side-by-side' ? (
+                  {unifiedViewMode === 'side-by-side' ? (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 bg-navy-950">
-                      {/* LEFT: Original Uploaded Image */}
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between text-xs text-gray-400 px-1 font-mono">
-                          <span>LEFT: Original Uploaded Image</span>
-                          <span className="text-[10px] text-gray-500">Raw Capture</span>
+                          <span>LEFT: Original Road Image</span>
+                          <span className="text-[10px] text-gray-500">Raw Input</span>
                         </div>
                         <div className="bg-black/60 rounded border border-gray-800 overflow-hidden flex items-center justify-center min-h-[300px] max-h-[460px]">
                           <img
-                            src={potholeResult.original_image_url}
+                            src={unifiedResult.overlay_url || unifiedPreview || ''}
                             alt="Original Road"
                             className="max-h-[440px] w-auto max-w-full object-contain"
                           />
                         </div>
                       </div>
 
-                      {/* RIGHT: AI Analysis Viewport */}
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between text-xs text-gray-400 px-1 font-mono">
-                          <span>RIGHT: AI Annotated Analysis</span>
-                          <span className="text-[10px] text-accent">YOLO BBoxes + Labels</span>
+                          <span>RIGHT: AI Hazard Overlay</span>
+                          <span className="text-[10px] text-accent">Potholes (BBoxes) + Water (Mask)</span>
                         </div>
                         <div className="bg-black/60 rounded border border-accent/30 overflow-hidden flex items-center justify-center min-h-[300px] max-h-[460px] relative">
                           <img
-                            src={potholeResult.processed_image_url}
-                            alt="AI Annotated Road"
+                            src={unifiedResult.overlay_url || unifiedPreview || ''}
+                            alt="AI Hazard Overlay"
                             className="max-h-[440px] w-auto max-w-full object-contain"
                           />
                         </div>
@@ -969,31 +1048,9 @@ export default function AIVision() {
                     </div>
                   ) : (
                     <div className="p-4 bg-navy-950 flex flex-col items-center justify-center">
-                      <div className="flex items-center gap-2 mb-3">
-                        <button
-                          onClick={() => setSingleViewToggle('processed')}
-                          className={`text-xs px-3 py-1 rounded font-semibold ${
-                            singleViewToggle === 'processed' ? 'bg-accent text-white' : 'bg-navy-800 text-gray-400'
-                          }`}
-                        >
-                          Detection Overlay
-                        </button>
-                        <button
-                          onClick={() => setSingleViewToggle('original')}
-                          className={`text-xs px-3 py-1 rounded font-semibold ${
-                            singleViewToggle === 'original' ? 'bg-accent text-white' : 'bg-navy-800 text-gray-400'
-                          }`}
-                        >
-                          Original Photo
-                        </button>
-                      </div>
                       <img
-                        src={
-                          singleViewToggle === 'processed'
-                            ? potholeResult.processed_image_url
-                            : potholeResult.original_image_url
-                        }
-                        alt="Road Visual"
+                        src={unifiedResult.overlay_url || unifiedPreview || ''}
+                        alt="AI Hazard Overlay"
                         className="max-h-[460px] w-auto max-w-full object-contain rounded border border-gray-800 shadow-xl"
                       />
                     </div>
@@ -1001,7 +1058,7 @@ export default function AIVision() {
                 </div>
 
                 {/* Bounding Box Detail Breakdown Table */}
-                {potholeResult.detections.length > 0 && (
+                {unifiedResult.potholes.detections.length > 0 && (
                   <div className="card">
                     <div className="card-header">Bounding Box Detections</div>
                     <div className="overflow-x-auto">
@@ -1017,7 +1074,7 @@ export default function AIVision() {
                           </tr>
                         </thead>
                         <tbody>
-                          {potholeResult.detections.map((det, idx) => (
+                          {unifiedResult.potholes.detections.map((det, idx) => (
                             <tr key={idx} className="border-b border-gray-900 hover:bg-navy-700/40">
                               <td className="py-2 pr-3 font-mono text-white font-semibold">#{idx + 1}</td>
                               <td className="py-2 pr-3 font-mono text-gray-400">
@@ -1033,15 +1090,9 @@ export default function AIVision() {
                                 {det.risk_score}/100
                               </td>
                               <td className="py-2">
-                                {det.is_demo ? (
-                                  <span className="text-[10px] bg-amber-500/10 text-amber-400 px-1.5 py-0.5 rounded border border-amber-500/20 font-mono">
-                                    Demo Sample
-                                  </span>
-                                ) : (
-                                  <span className="text-[10px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/20 font-mono">
-                                    YOLO Model
-                                  </span>
-                                )}
+                                <span className="text-[10px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/20 font-mono">
+                                  YOLO Model
+                                </span>
                               </td>
                             </tr>
                           ))}
@@ -1053,30 +1104,26 @@ export default function AIVision() {
               </>
             ) : (
               <div className="card p-10 text-center flex flex-col items-center justify-center min-h-[420px]">
-                {isAnalyzingPothole ? (
+                {isAnalyzingUnified ? (
                   <div className="space-y-4 max-w-sm text-center">
                     <div className="w-16 h-16 rounded-full border-4 border-accent border-t-transparent animate-spin mx-auto shadow-lg shadow-accent/20" />
-                    <div className="text-white text-base font-bold">Executing YOLOv8 Neural Inference...</div>
+                    <div className="text-white text-base font-bold">Running Unified AI Road Analysis...</div>
                     <p className="text-gray-400 text-xs leading-relaxed">
-                      Detecting asphalt cavities, computing bounding boxes, measuring physical dimensions, and synthesizing corridor risk score...
+                      Detecting potholes, segmenting standing water, classifying surface condition, and calculating synthesized corridor risk...
                     </p>
-                    {potholePreview && (
-                      <div className="relative rounded-lg overflow-hidden border border-accent/40 max-w-[280px] mx-auto mt-2 opacity-75">
-                        <img src={potholePreview} alt="Scanning" className="max-h-36 w-auto mx-auto object-cover" />
-                        <div className="absolute inset-0 bg-accent/15 animate-pulse flex items-center justify-center">
-                          <span className="text-[11px] font-mono font-bold bg-navy-950/80 text-accent px-2 py-0.5 rounded border border-accent/40">
-                            SCANNING SURFACE...
-                          </span>
-                        </div>
-                      </div>
-                    )}
                   </div>
-                ) : potholePreview ? (
+                ) : unifiedPreview ? (
                   <div className="space-y-4 max-w-sm">
-                    <img src={potholePreview} alt="Upload preview" className="max-h-52 rounded-lg border border-gray-700 mx-auto shadow-md" />
-                    <div className="text-white text-sm font-semibold">Image loaded and ready for analysis</div>
-                    <button onClick={handlePotholeSubmit} disabled={isAnalyzingPothole} className="btn-primary w-full text-xs py-2.5 flex items-center justify-center gap-2">
-                      <span>⚡</span> Run Road Image Analysis →
+                    <img src={unifiedPreview} alt="Upload preview" className="max-h-52 rounded-lg border border-gray-700 mx-auto shadow-md" />
+                    <div className="text-white text-sm font-semibold">Road Image Loaded</div>
+                    <button
+                      onClick={() => {
+                        if (unifiedFile) processUnifiedFile(unifiedFile, true)
+                      }}
+                      disabled={isAnalyzingUnified}
+                      className="btn-primary w-full text-xs py-2.5 flex items-center justify-center gap-2"
+                    >
+                      <span>⚡</span> RUN AI ROAD ANALYSIS →
                     </button>
                   </div>
                 ) : (
@@ -1086,22 +1133,8 @@ export default function AIVision() {
                     </div>
                     <div className="text-white font-semibold text-base">No Road Image Analyzed Yet</div>
                     <p className="text-gray-400 text-xs leading-relaxed">
-                      Upload an asphalt surface photo (JPG or PNG) or choose a test sample above to inspect surface distress, bounding boxes, severity assessment, and synthesized road risk scores.
+                      Upload any road image (JPG, PNG, WEBP) or capture from your camera to automatically scan for potholes, water accumulation, and surface hazards in a single step.
                     </p>
-                    <div className="flex items-center justify-center gap-2 pt-2">
-                      <button
-                        onClick={loadPrecomputedDemoSample}
-                        className="px-3.5 py-2 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors shadow-sm"
-                      >
-                        <span>★</span> Damaged Road Sample
-                      </button>
-                      <button
-                        onClick={() => loadSamplePotholeImage('clean')}
-                        className="px-3.5 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors shadow-sm"
-                      >
-                        <span>✓</span> Clean Road Sample
-                      </button>
-                    </div>
                   </div>
                 )}
               </div>

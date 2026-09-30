@@ -23,12 +23,14 @@ from backend.schemas import (
 from backend.services.pothole_detection import PotholeDetectionService
 from backend.services.traffic_analysis import TrafficAnalysisService
 from backend.services.water_detection import WaterDetectionService
+from backend.services.road_analysis import UnifiedRoadAnalysisService
 
 router = APIRouter()
 
 pothole_service = PotholeDetectionService()
 traffic_service = TrafficAnalysisService()
 water_service = WaterDetectionService()
+road_analysis_service = UnifiedRoadAnalysisService()
 
 MAX_IMAGE_SIZE = 15 * 1024 * 1024  # 15 MB
 MAX_VIDEO_SIZE = 50 * 1024 * 1024  # 50 MB
@@ -38,15 +40,15 @@ ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi"}
 
 @router.get("/ai/status", response_model=AIModelStatusOut)
 def get_ai_status():
-    """Returns local model loading status and demo mode state."""
+    """Returns truthful local model loading status and demo mode state."""
     p_loaded = pothole_service.is_configured()
     t_loaded = traffic_service.model is not None
-    w_loaded = water_service.is_configured()
+    w_loaded = water_service.is_loaded
 
     msg = (
         "All local AI models (Pothole, Traffic, Water Segmentation) active."
         if p_loaded and t_loaded and w_loaded
-        else "Local AI Vision pipeline active with Optical Water-Region Segmenter."
+        else f"Local AI Vision pipeline active. Pothole: {'Loaded' if p_loaded else 'Unconfigured'}, Traffic: {'Loaded' if t_loaded else 'Offline'}, Water: {'Loaded' if w_loaded else 'Model unavailable'}."
     )
 
     return AIModelStatusOut(
@@ -54,7 +56,7 @@ def get_ai_status():
         pothole_model_loaded=p_loaded,
         traffic_model_path=traffic_service.model_path,
         traffic_model_loaded=t_loaded,
-        water_model_path=water_service.model_path,
+        water_model_path=water_service.model_path or "models/water/best.pt",
         water_model_loaded=w_loaded,
         is_pothole_demo_mode=not p_loaded,
         is_traffic_demo_mode=not t_loaded,
@@ -886,4 +888,58 @@ async def analyze_water_image(
         longitude=assigned_lng,
         timestamp=datetime.utcnow().isoformat(),
     )
+
+
+@router.post("/road/analyze")
+async def analyze_road_condition_image(
+    file: UploadFile = File(...),
+    road_id: Optional[int] = Form(None),
+    latitude: Optional[float] = Form(None),
+    longitude: Optional[float] = Form(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Unified AI Road Condition Analysis Endpoint.
+    Upload ONE road image -> AI automatically runs all available hazard detectors:
+    - Pothole detection
+    - Water accumulation segmentation
+    - Spatial mask overlap (Water-Filled Potholes)
+    - Surface condition classification (EXCELLENT/GOOD/FAIR/POOR/CRITICAL)
+    - Transparent risk score calculation
+    """
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported image extension '{ext}'. Allowed formats: JPG, JPEG, PNG, WEBP.",
+        )
+
+    image_bytes = await file.read()
+    if len(image_bytes) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded image file is empty.",
+        )
+    if len(image_bytes) > MAX_IMAGE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Image file exceeds maximum allowable size of 15MB ({len(image_bytes)/(1024*1024):.1f}MB).",
+        )
+
+    try:
+        result = road_analysis_service.analyze_road_image(
+            image_bytes=image_bytes,
+            filename=file.filename or "road_upload.jpg",
+            road_id=road_id,
+            latitude=latitude,
+            longitude=longitude,
+            db=db,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unified AI road condition analysis failed: {str(e)}",
+        )
+
 

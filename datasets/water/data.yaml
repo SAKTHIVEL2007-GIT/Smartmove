@@ -1,0 +1,19 @@
+# SafeCity Saathi V2 — Water Segmentation Dataset Configuration
+# Task: Polygon Instance Segmentation (task: segment)
+
+path: datasets/water
+train: images/train
+val: images/val
+test: images/test
+
+# Classes
+nc: 5
+names:
+  0: water_accumulation   # Standing water puddles / waterlogging
+  1: wet_road             # Wet asphalt without standing water pools
+  2: dry_road             # Normal dry pavement surface
+  3: shadow               # Dark tree/building shadows
+  4: reflection           # Specular glints and window/vehicle reflections
+
+# Ultralytics YOLOv8 Segmentation Training Command:
+# yolo task=segment mode=train model=yolov8n-seg.pt data=datasets/water/data.yaml epochs=50 imgsz=640 project=models name=water

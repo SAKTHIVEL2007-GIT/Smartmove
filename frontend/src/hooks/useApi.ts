@@ -7,7 +7,7 @@ import type {
   RouteComparisonResult, SmartJunctionDisplayState,
   RoadSegmentDossier, EvidenceFile, AuditLog, NearMiss, DecisionAuditRecord,
   RiskEvaluationResult, InterventionSimulationResult, InterventionComparisonResult,
-  WaterAnalysisResult,
+  WaterAnalysisResult, UnifiedRoadAnalysisResult,
 } from '@/types'
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -251,6 +251,45 @@ export function useAnalyzeWater() {
         formData.append('pothole_count', pothole_count.toString())
       }
       const response = await api.post('/api/water/analyze', formData, {
+        headers: { 'Content-Type': undefined },
+        timeout: 120_000,
+      })
+      return response.data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryKeyRefetch(queryClient, 'hazards')
+      queryKeyRefetch(queryClient, 'roads')
+      queryKeyRefetch(queryClient, 'ai-events')
+      queryKeyRefetch(queryClient, 'danger-zones')
+      queryKeyRefetch(queryClient, 'road-intelligence')
+      queryKeyRefetch(queryClient, 'evidence')
+      queryKeyRefetch(queryClient, 'audit-logs')
+    },
+  })
+}
+
+export function useAnalyzeRoadCondition() {
+  const queryClient = useQueryClient()
+  return useMutation<UnifiedRoadAnalysisResult, Error, {
+    file: File;
+    road_id?: number;
+    latitude?: number;
+    longitude?: number;
+  }>({
+    mutationFn: async ({ file, road_id, latitude, longitude }) => {
+      const formData = new FormData()
+      formData.append('file', file)
+      if (road_id !== undefined && road_id !== null) {
+        formData.append('road_id', road_id.toString())
+      }
+      if (latitude !== undefined && latitude !== null) {
+        formData.append('latitude', latitude.toString())
+      }
+      if (longitude !== undefined && longitude !== null) {
+        formData.append('longitude', longitude.toString())
+      }
+      const response = await api.post('/api/road/analyze', formData, {
         headers: { 'Content-Type': undefined },
         timeout: 120_000,
       })
